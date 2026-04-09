@@ -16,26 +16,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/token", auto_error=False)
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    
-    user = db.query(User).filter(User.username == username).first()
-    if user is None:
-        raise credentials_exception
-    return user
+    # --- AUTH BYPASS INJECTED AS REQUESTED ---
+    # Automatically creates and returns a mock user to unblock UI testing
+    admin_user = db.query(User).filter(User.username == "admin_bypass").first()
+    if not admin_user:
+        admin_user = User(username="admin_bypass", hashed_password="bypass_hash")
+        db.add(admin_user)
+        db.commit()
+    return admin_user
 
 class UserCreate(BaseModel):
     username: str
@@ -115,39 +106,130 @@ def get_ai_signals(db: Session = Depends(get_db), current_user: User = Depends(g
 @router.get("/api/analyze/{symbol}")
 def analyze_symbol(symbol: str, interval: str = "1d", period: str = "6mo", engine: str = "astra", current_user: User = Depends(get_current_user)):
     """
-    Kicks off an ML analysis task.
-    Attempts to use Celery for background processing.
-    Falls back to synchronous execution if Celery/Redis is unavailable.
+    Runs market analysis synchronously and returns a flat JSON result.
+    The response contains chartData, signal, price info directly at the top level.
     """
-    from app.services.tasks import run_ai_analysis
     from app.services.ai_predictor import ai_engine
     
-    # Check if redis is actually reachable to avoid hanging on .delay()
-    redis_up = False
     try:
-        import redis
-        from app.services.tasks import REDIS_URL
-        r = redis.from_url(REDIS_URL, socket_connect_timeout=1)
-        r.ping()
-        redis_up = True
-    except:
-        redis_up = False
-
-    try:
-        if not redis_up:
-            raise Exception("Redis unreachable")
-            
-        # Try to queue the task
-        task = run_ai_analysis.delay(symbol.upper(), interval=interval, period=period)
-        return {"status": "processing", "task_id": task.id}
+        result = ai_engine.analyze_market_data(symbol.upper(), interval=interval, period=period, engine=engine)
+        return result
     except Exception as e:
-        logger.warning(f"Celery unavailable ({e}). Falling back to sync for {symbol}.")
-        # Synchronous fallback
+        logger.error(f"Analysis failed for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/financials/{symbol}")
+def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
+    """
+    Returns fundamental financial data for a symbol using yfinance Ticker.info.
+    Powers the Financials, Forecasts, and Overview tabs.
+    """
+    import yfinance as yf
+    import math
+    
+    def safe(v):
+        """Sanitize NaN/Inf values for JSON serialization."""
+        if v is None: return None
         try:
-            result = ai_engine.analyze_market_data(symbol.upper(), interval=interval, period=period, engine=engine)
-            return {"status": "completed", "result": result}
-        except Exception as sync_e:
-            raise HTTPException(status_code=500, detail=str(sync_e))
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return None
+        except: pass
+        return v
+    
+    try:
+        sym = symbol.upper()
+        if "." not in sym and "^" not in sym and "=" not in sym:
+            sym = sym + ".NS"
+        ticker = yf.Ticker(sym)
+        info = ticker.info or {}
+        
+        # Key facts
+        key_facts = {
+            "marketCap": safe(info.get("marketCap")),
+            "dividendYield": safe(info.get("dividendYield")),
+            "trailingPE": safe(info.get("trailingPE")),
+            "forwardPE": safe(info.get("forwardPE")),
+            "trailingEps": safe(info.get("trailingEps")),
+            "forwardEps": safe(info.get("forwardEps")),
+            "priceToBook": safe(info.get("priceToBook")),
+            "priceToSales": safe(info.get("priceToSalesTrailing12Months")),
+            "beta": safe(info.get("beta")),
+            "fiftyTwoWeekHigh": safe(info.get("fiftyTwoWeekHigh")),
+            "fiftyTwoWeekLow": safe(info.get("fiftyTwoWeekLow")),
+            "averageVolume": safe(info.get("averageVolume")),
+            "sharesOutstanding": safe(info.get("sharesOutstanding")),
+            "floatShares": safe(info.get("floatShares")),
+            "heldPercentInsiders": safe(info.get("heldPercentInsiders")),
+            "heldPercentInstitutions": safe(info.get("heldPercentInstitutions")),
+        }
+        
+        # Company profile
+        profile = {
+            "name": info.get("longName") or info.get("shortName") or symbol,
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "website": info.get("website"),
+            "description": info.get("longBusinessSummary"),
+            "country": info.get("country"),
+            "city": info.get("city"),
+            "employees": safe(info.get("fullTimeEmployees")),
+            "currency": info.get("currency", "INR"),
+        }
+        
+        # Dividends
+        dividends = {
+            "dividendRate": safe(info.get("dividendRate")),
+            "dividendYield": safe(info.get("dividendYield")),
+            "payoutRatio": safe(info.get("payoutRatio")),
+            "exDividendDate": info.get("exDividendDate"),
+            "lastDividendValue": safe(info.get("lastDividendValue")),
+        }
+        
+        # Growth & profitability
+        growth = {
+            "revenueGrowth": safe(info.get("revenueGrowth")),
+            "earningsGrowth": safe(info.get("earningsGrowth")),
+            "grossMargins": safe(info.get("grossMargins")),
+            "operatingMargins": safe(info.get("operatingMargins")),
+            "profitMargins": safe(info.get("profitMargins")),
+            "returnOnEquity": safe(info.get("returnOnEquity")),
+            "returnOnAssets": safe(info.get("returnOnAssets")),
+            "totalRevenue": safe(info.get("totalRevenue")),
+            "netIncome": safe(info.get("netIncomeToCommon")),
+            "totalDebt": safe(info.get("totalDebt")),
+            "totalCash": safe(info.get("totalCash")),
+            "freeCashflow": safe(info.get("freeCashflow")),
+            "operatingCashflow": safe(info.get("operatingCashflow")),
+            "debtToEquity": safe(info.get("debtToEquity")),
+            "currentRatio": safe(info.get("currentRatio")),
+        }
+        
+        # Analyst targets
+        forecasts = {
+            "targetHighPrice": safe(info.get("targetHighPrice")),
+            "targetLowPrice": safe(info.get("targetLowPrice")),
+            "targetMeanPrice": safe(info.get("targetMeanPrice")),
+            "targetMedianPrice": safe(info.get("targetMedianPrice")),
+            "recommendationKey": info.get("recommendationKey"),
+            "recommendationMean": safe(info.get("recommendationMean")),
+            "numberOfAnalystOpinions": safe(info.get("numberOfAnalystOpinions")),
+        }
+        
+        return {
+            "symbol": symbol.upper(),
+            "profile": profile,
+            "keyFacts": key_facts,
+            "dividends": dividends,
+            "growth": growth,
+            "forecasts": forecasts,
+        }
+    except Exception as e:
+        logger.error(f"Financials fetch failed for {symbol}: {e}")
+        return {
+            "symbol": symbol.upper(),
+            "profile": {"name": symbol.upper()},
+            "keyFacts": {}, "dividends": {}, "growth": {}, "forecasts": {},
+            "error": str(e)
+        }
 
 @router.get("/api/analyze/status/{task_id}")
 def get_analysis_status(task_id: str):
