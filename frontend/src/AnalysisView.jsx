@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Search, RefreshCw, TrendingUp, TrendingDown, ChevronRight, ZoomIn, ZoomOut, Maximize2, ExternalLink, DollarSign, BarChart3, Target, PieChart } from 'lucide-react';
+import { Search, RefreshCw, TrendingUp, TrendingDown, ChevronRight, ZoomIn, ZoomOut, Maximize2, ExternalLink, DollarSign, BarChart3, Target, PieChart, Bitcoin } from 'lucide-react';
 import { createChart, ColorType, CrosshairMode } from 'lightweight-charts';
 import FullChartModal from './FullChartModal.jsx';
 
@@ -283,12 +283,23 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+/* ── HELPERS ── */
+const CRYPTO_SYMBOLS = new Set(['BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'AVAX']);
+const isCrypto = (sym) => {
+  if (!sym) return false;
+  const base = sym.split('-')[0].toUpperCase();
+  return CRYPTO_SYMBOLS.has(base) || sym.includes('-USD') || sym.includes('-INR') || sym.includes('-USDT');
+};
+
 /* ── MAIN COMPONENT ── */
 const TABS = ['Overview', 'Financials', 'Technicals', 'Forecasts'];
+const CRYPTO_QUICK = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD'];
+const EQUITY_QUICK = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'AAPL'];
 
-function AnalysisViewImpl() {
-  const [symbol, setSymbol] = useState('RELIANCE');
+function AnalysisViewImpl({ initialSymbol, initialMarket }) {
+  const [symbol, setSymbol] = useState(initialSymbol || 'RELIANCE');
   const [engine, setEngine] = useState('astra');
+  const [cryptoMarket, setCryptoMarket] = useState(initialMarket || 'international');
   const [activeTab, setActiveTab] = useState('Overview');
   const [data, setData] = useState(null);
   const [fin, setFin] = useState(null);
@@ -298,42 +309,77 @@ function AnalysisViewImpl() {
   const chartContainerRef = useRef(null);
   const chartRef = useRef(null);
 
-  const analyze = useCallback(async (sym, eng) => {
-    sym = sym || symbol; eng = eng || engine;
+  // Update symbol/market if parent navigation changes
+  useEffect(() => {
+    if (initialSymbol) {
+      setSymbol(initialSymbol);
+      if (initialMarket) setCryptoMarket(initialMarket);
+    }
+  }, [initialSymbol, initialMarket]);
+
+  const isCryptoMode = isCrypto(symbol);
+
+  const analyze = useCallback(async (sym, eng, mkt) => {
+    sym = sym || symbol; eng = eng || engine; mkt = mkt || cryptoMarket;
     if (!sym) return;
     setLoading(true); setError(''); setData(null); setFin(null);
     try {
       const token = localStorage.getItem('token');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
-      const [resA, resF] = await Promise.all([
-        fetch(`http://localhost:8000/api/analyze/${sym}?engine=${eng}`, { headers }),
-        fetch(`http://localhost:8000/api/financials/${sym}`, { headers }),
-      ]);
-      if (!resA.ok) throw new Error(`Server returned ${resA.status}`);
-      const json = await resA.json();
-      const payload = json.result || json;
-      if (payload.error) throw new Error(payload.error);
+
+      const isC = isCrypto(sym);
+      let payload;
+
+      if (isC) {
+        // Route to crypto endpoint
+        const cryptoEngine = eng.startsWith('astra_crypto') ? eng : 'astra_crypto';
+        const res = await fetch(
+          `http://localhost:8000/api/crypto/analyze/${sym}?market=${mkt}&engine=${cryptoEngine}`,
+          { headers }
+        );
+        if (!res.ok) throw new Error(`Server returned ${res.status}`);
+        const json = await res.json();
+        if (json.error) throw new Error(json.error);
+        payload = json;
+      } else {
+        // Route to equity endpoint
+        const [resA, resF] = await Promise.all([
+          fetch(`http://localhost:8000/api/analyze/${sym}?engine=${eng}`, { headers }),
+          fetch(`http://localhost:8000/api/financials/${sym}`, { headers }),
+        ]);
+        if (!resA.ok) throw new Error(`Server returned ${resA.status}`);
+        const json = await resA.json();
+        payload = json.result || json;
+        if (payload.error) throw new Error(payload.error);
+        try { const fj = await resF.json(); setFin(fj); } catch {}
+      }
+
       setData(payload);
-      try { const fj = await resF.json(); setFin(fj); } catch {}
     } catch (e) { setError(e.message || 'Connection failed'); }
     finally { setLoading(false); }
-  }, [symbol, engine]);
+  }, [symbol, engine, cryptoMarket]);
 
   const loadInterval = useCallback(async (interval, period) => {
     try {
       const token = localStorage.getItem('token');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
-      const res = await fetch(`http://localhost:8000/api/analyze/${symbol}?engine=${engine}&interval=${interval}&period=${period}`, { headers });
+      const isC = isCrypto(symbol);
+      let res;
+      if (isC) {
+        res = await fetch(`http://localhost:8000/api/crypto/analyze/${symbol}?market=${cryptoMarket}&timeframe=${interval}`, { headers });
+      } else {
+        res = await fetch(`http://localhost:8000/api/analyze/${symbol}?engine=${engine}&interval=${interval}&period=${period}`, { headers });
+      }
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const json = await res.json();
       const payload = json.result || json;
       setData(payload);
     } catch (e) { console.error('Interval load failed:', e); }
-  }, [symbol, engine]);
+  }, [symbol, engine, cryptoMarket]);
 
-  useEffect(() => { analyze(); }, []);
-  const handleSubmit = (e) => { e.preventDefault(); analyze(symbol, engine); };
-  const switchEngine = (eng) => { setEngine(eng); analyze(symbol, eng); };
+  useEffect(() => { analyze(); }, [initialSymbol]);
+  const handleSubmit = (e) => { e.preventDefault(); analyze(symbol, engine, cryptoMarket); };
+  const switchEngine = (eng) => { setEngine(eng); analyze(symbol, eng, cryptoMarket); };
 
   const kd = useMemo(() => {
     if (!data?.chartData?.length) return null;
@@ -375,13 +421,59 @@ function AnalysisViewImpl() {
         <form onSubmit={handleSubmit} style={S.searchRow}>
           <div style={{ position: 'relative', flex: 1, maxWidth: 420 }}>
             <Search size={16} style={S.searchIcon}/>
-            <input style={S.searchInput} placeholder="Search symbol (e.g. RELIANCE, TCS, INFY)…" value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())}/>
+            <input
+              style={S.searchInput}
+              placeholder={isCryptoMode ? 'Crypto: BTC-USD, ETH-INR, SOL-USD…' : 'Equity: RELIANCE, TCS, AAPL…'}
+              value={symbol}
+              onChange={e => setSymbol(e.target.value.toUpperCase())}
+            />
           </div>
           <button type="submit" style={S.btn}>Analyze</button>
         </form>
-        <div style={S.engineBar}>
-          {['astra', 'astra_ai', 'astra_ml'].map(e => <button key={e} style={S.engineTab(engine === e)} onClick={() => switchEngine(e)}>{e === 'astra' ? 'ASTRA 1.0' : e === 'astra_ai' ? 'ASTRA.AI' : 'ASTRA.ML'}</button>)}
+
+        {/* Quick presets */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: '#787b86', fontWeight: 600, textTransform: 'uppercase' }}>Quick:</span>
+          {EQUITY_QUICK.map(s => (
+            <button key={s} onClick={() => { setSymbol(s); analyze(s, engine, cryptoMarket); }}
+              style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #2a2e39', background: symbol === s ? '#2962ff22' : '#1e222d', color: symbol === s ? '#2962ff' : '#787b86', cursor: 'pointer', fontSize: 12, fontFamily: "'Inter', sans-serif" }}>
+              {s}
+            </button>
+          ))}
+          <span style={{ color: '#2a2e39', fontSize: 14 }}>|</span>
+          <Bitcoin size={13} color="#f7931a"/>
+          {CRYPTO_QUICK.map(s => (
+            <button key={s} onClick={() => { setSymbol(s); analyze(s, engine, cryptoMarket); }}
+              style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid #2a2e39', background: symbol === s ? '#f7931a22' : '#1e222d', color: symbol === s ? '#f7931a' : '#787b86', cursor: 'pointer', fontSize: 12, fontFamily: "'Inter', sans-serif" }}>
+              {s}
+            </button>
+          ))}
         </div>
+
+        {/* Engine bar — show crypto engines for crypto symbols */}
+        {isCryptoMode ? (
+          <div style={S.engineBar}>
+            {[
+              ['astra_crypto', 'ASTRA.CRYPTO'],
+              ['astra_crypto_ml', 'ASTRA.CRYPTO.ML'],
+            ].map(([e, label]) => (
+              <button key={e} style={S.engineTab(engine === e)} onClick={() => switchEngine(e)}>{label}</button>
+            ))}
+            <div style={{ width: 1, background: '#2a2e39', margin: '4px 4px' }}/>
+            {[['international', '🌐 Intl (USD)'], ['indian', '🇮🇳 India (INR)']].map(([m, label]) => (
+              <button key={m} style={S.engineTab(cryptoMarket === m)}
+                onClick={() => { setCryptoMarket(m); analyze(symbol, engine, m); }}>{label}</button>
+            ))}
+          </div>
+        ) : (
+          <div style={S.engineBar}>
+            {['astra', 'astra_ai', 'astra_ml'].map(e => (
+              <button key={e} style={S.engineTab(engine === e)} onClick={() => switchEngine(e)}>
+                {e === 'astra' ? 'ASTRA 1.0' : e === 'astra_ai' ? 'ASTRA.AI' : 'ASTRA.ML'}
+              </button>
+            ))}
+          </div>
+        )}
 
         {loading && <div style={S.loadWrap}><RefreshCw size={28} color="#787b86" style={{ animation: 'spin 1.5s linear infinite' }}/><p style={{ color: '#787b86', marginTop: 16, fontSize: 14 }}>Analyzing {symbol}…</p><style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style></div>}
         {error && !loading && <div style={S.errWrap}><p style={{ color: '#ef5350', fontSize: 18, fontWeight: 700 }}>Analysis Failed</p><p style={{ color: '#f77c80', fontSize: 13 }}>{error}</p><button onClick={() => analyze()} style={{ ...S.btn, marginTop: 12 }}>Retry</button></div>}
@@ -470,6 +562,6 @@ function AnalysisViewImpl() {
   );
 }
 
-export default function AnalysisView() {
-  return <ErrorBoundary><AnalysisViewImpl/></ErrorBoundary>;
+export default function AnalysisView({ initialSymbol, initialMarket }) {
+  return <ErrorBoundary><AnalysisViewImpl initialSymbol={initialSymbol} initialMarket={initialMarket}/></ErrorBoundary>;
 }

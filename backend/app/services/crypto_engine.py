@@ -215,7 +215,7 @@ class CryptoEngine:
             period = "2y" if timeframe == "1d" else ("3mo" if timeframe == "1h" else "1mo")
             df = self._fetch_yfinance_crypto(yf_symbol, period=period, interval=timeframe)
             if df.empty:
-                logger.error(f"CIRCUIT BREAKER: No data for Indian crypto {symbol}")
+                logger.warning(f"⚠️  Data source exhausted for Indian crypto {symbol}")
             return df
         else:
             # International: CCXT first, yfinance fallback
@@ -230,7 +230,7 @@ class CryptoEngine:
             # Fallback: yfinance USD pairs
             df = self._fetch_yfinance_crypto(symbol, period="2y", interval=timeframe)
             if df.empty:
-                logger.error(f"CIRCUIT BREAKER: No data for {symbol}")
+                logger.warning(f"⚠️  Data source exhausted for {symbol}")
             return df
 
     # ─────────────────────── INDICATOR LIBRARY ───────────────────────
@@ -432,7 +432,7 @@ class CryptoEngine:
         try:
             df_raw = self.fetch_data(symbol, market=market, timeframe=timeframe)
             if df_raw.empty:
-                return self._error_response(symbol, "Data unavailable — circuit breaker triggered")
+                return self._error_response(symbol, "Real-time crypto data currently unavailable from all sources (Binance/Yahoo).")
 
             df = self._compute_features(df_raw)
             if len(df) < 5:

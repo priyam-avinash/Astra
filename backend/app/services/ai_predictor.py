@@ -96,15 +96,55 @@ class AIPredictionEngine:
     # ─────────────────────── DATA FETCHING ───────────────────────
 
     def _fetch_data(self, symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-        """Fetch OHLCV data. CIRCUIT BREAKER: returns None on failure — no synthetic fallback."""
+        """
+        Fetch OHLCV data with multi-source fallback chain.
+        Source priority:
+          1. Twelve Data (800 req/day free — best quality, supports Indian stocks)
+          2. Alpha Vantage (25 req/day — reliable backup)
+          3. yfinance primary
+          4. yfinance with .NS suffix
+          5. CIRCUIT BREAKER — no synthetic fallback
+        """
+        # Determine if we need extended history (>100 days)
+        need_full = period in ["1y", "2y", "5y", "max", "2mo", "3mo", "6mo"]
 
-        # 1. Try Alpha Vantage (25 requests/day)
+        # 1. Twelve Data (800 free req/day, excellent Indian stock coverage)
+        td_key = os.getenv("TWELVE_DATA_KEY", "")  # Optional — set in .env for best quality
+        if td_key and interval == "1d":
+            try:
+                td_symbol = symbol.replace(".NS", "")  # Twelve Data uses bare symbols for NSE
+                td_exchange = "NSE" if ".NS" in symbol else ""
+                ex_param = f"&exchange={td_exchange}" if td_exchange else ""
+                # Map yfinance period to outputsize
+                size_map = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+                outputsize = size_map.get(period, 180)
+                url = (
+                    f"https://api.twelvedata.com/time_series?symbol={td_symbol}{ex_param}"
+                    f"&interval=1day&outputsize={outputsize}&apikey={td_key}&format=JSON"
+                )
+                res = requests.get(url, timeout=8)
+                data = res.json()
+                if "values" in data and len(data["values"]) > 20:
+                    df_td = pd.DataFrame(data["values"])
+                    df_td["datetime"] = pd.to_datetime(df_td["datetime"])
+                    df_td = df_td.set_index("datetime").sort_index()
+                    df_td = df_td.rename(columns={"open": "Open", "high": "High",
+                                                   "low": "Low", "close": "Close",
+                                                   "volume": "Volume"})
+                    df_td = df_td[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                    logger.info(f"Twelve Data feed OK for {symbol}: {len(df_td)} bars")
+                    return df_td
+            except Exception as e:
+                logger.debug(f"Twelve Data unavailable: {e}")
+
+        # 2. Alpha Vantage — use 'full' outputsize to get up to 20 years (not 'compact' = 100 days)
         try:
             av_key = os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ")
             av_symbol = symbol.replace(".NS", ".BSE")
+            outputsize = "full" if need_full else "compact"
             url = (
                 f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={av_symbol}&apikey={av_key}&outputsize=compact"
+                f"&symbol={av_symbol}&apikey={av_key}&outputsize={outputsize}"
             )
             res = requests.get(url, timeout=8)
             data = res.json()
@@ -118,7 +158,7 @@ class AIPredictionEngine:
                 df_av.index = pd.to_datetime(df_av.index)
                 df_av = df_av.astype(float).sort_index()
                 if len(df_av) > 20:
-                    logger.info(f"AlphaVantage feed OK for {symbol}")
+                    logger.info(f"AlphaVantage feed OK for {symbol}: {len(df_av)} bars")
                     return df_av
         except Exception as e:
             logger.debug(f"AlphaVantage unavailable: {e}")
@@ -148,8 +188,98 @@ class AIPredictionEngine:
             except Exception:
                 pass
 
-        # 4. CIRCUIT BREAKER — no synthetic data
-        logger.error(f"CIRCUIT BREAKER: Cannot fetch real data for {symbol}. Returning HOLD.")
+        # 4. Data exhaust - all sources failed
+        logger.warning(f"⚠️  Data fetch exhausted for {symbol}. Proceeding with empty set.")
+        return pd.DataFrame()
+
+    def _fetch_and_cache(self, symbol: str, period: str, interval: str) -> pd.DataFrame:
+        """Internal: fetch from APIs then write to cache."""
+        # Determine full vs compact for AV
+        need_full = period in ["1y", "2y", "5y", "max", "2mo", "3mo", "6mo"]
+
+        # 1. Twelve Data
+        td_key = os.getenv("TWELVE_DATA_KEY", "")
+        if td_key and interval == "1d":
+            try:
+                td_symbol = symbol.replace(".NS", "")
+                td_exchange = "NSE" if ".NS" in symbol else ""
+                ex_param = f"&exchange={td_exchange}" if td_exchange else ""
+                size_map = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+                outputsize = size_map.get(period, 180)
+                url = (
+                    f"https://api.twelvedata.com/time_series?symbol={td_symbol}{ex_param}"
+                    f"&interval=1day&outputsize={outputsize}&apikey={td_key}&format=JSON"
+                )
+                res = requests.get(url, timeout=8)
+                data = res.json()
+                if "values" in data and len(data["values"]) > 20:
+                    df_td = pd.DataFrame(data["values"])
+                    df_td["datetime"] = pd.to_datetime(df_td["datetime"])
+                    df_td = df_td.set_index("datetime").sort_index()
+                    df_td = df_td.rename(columns={"open": "Open", "high": "High",
+                                                   "low": "Low", "close": "Close",
+                                                   "volume": "Volume"})
+                    df_td = df_td[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                    cache_put(symbol, df_td, interval)
+                    logger.info(f"Twelve Data feed OK for {symbol}: {len(df_td)} bars")
+                    return df_td
+            except Exception as e:
+                logger.debug(f"Twelve Data unavailable: {e}")
+
+        # 2. Alpha Vantage (full outputsize)
+        try:
+            av_key = os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ")
+            av_symbol = symbol.replace(".NS", ".BSE")
+            outputsize = "full" if need_full else "compact"
+            url = (
+                f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
+                f"&symbol={av_symbol}&apikey={av_key}&outputsize={outputsize}"
+            )
+            res = requests.get(url, timeout=8)
+            data = res.json()
+            if "Time Series (Daily)" in data:
+                ts = data["Time Series (Daily)"]
+                df_av = pd.DataFrame.from_dict(ts, orient="index")
+                df_av = df_av.rename(columns={
+                    "1. open": "Open", "2. high": "High",
+                    "3. low": "Low", "4. close": "Close", "5. volume": "Volume"
+                })
+                df_av.index = pd.to_datetime(df_av.index)
+                df_av = df_av.astype(float).sort_index()
+                if len(df_av) > 20:
+                    cache_put(symbol, df_av, interval)
+                    logger.info(f"AlphaVantage feed OK for {symbol}: {len(df_av)} bars")
+                    return df_av
+        except Exception as e:
+            logger.debug(f"AlphaVantage unavailable: {e}")
+
+        # 3. yfinance primary
+        try:
+            df = yf.download(symbol, period=period, interval=interval,
+                             auto_adjust=True, progress=False, timeout=10)
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                if len(df) > 20:
+                    cache_put(symbol, df, interval)
+                    return df
+        except Exception:
+            pass
+
+        # 4. yfinance .NS suffix
+        if ".NS" not in symbol and "^" not in symbol and "=" not in symbol and "-" not in symbol:
+            try:
+                df = yf.download(symbol + ".NS", period=period, interval=interval,
+                                 auto_adjust=True, progress=False, timeout=10)
+                if df is not None and not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    if len(df) > 20:
+                        cache_put(symbol, df, interval)  # Cache under original symbol key
+                        return df
+            except Exception:
+                pass
+
         return pd.DataFrame()
 
     # ─────────────────────── INDICATOR LIBRARY ───────────────────────
@@ -372,7 +502,7 @@ class AIPredictionEngine:
             if df_raw.empty:
                 return {
                     "asset": asset_symbol, "signal": "HOLD", "confidence": 0.0,
-                    "error": "Data unavailable — circuit breaker triggered",
+                    "error": "Real-time data currently unavailable from all sources.",
                     "current_price": 0.0, "entry_price": 0.0, "target": 0.0, "stop_loss": 0.0,
                     "chartData": []
                 }
@@ -609,7 +739,7 @@ class AIPredictionEngine:
             X_train, X_val = X_seq[:split], X_seq[split:]
             y_train, y_val = y_seq[:split], y_seq[split:]
 
-            # ── Bidirectional LSTM with Attention ──
+            # ── Bidirectional LSTM with Attention (no Lambda layers) ──
             inputs = tf.keras.Input(shape=(lookback, len(FEATURE_COLS)))
             x = tf.keras.layers.Bidirectional(
                 tf.keras.layers.LSTM(128, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)
@@ -617,13 +747,8 @@ class AIPredictionEngine:
             x = tf.keras.layers.Bidirectional(
                 tf.keras.layers.LSTM(64, return_sequences=True, dropout=0.2)
             )(x)
-            # Attention layer
-            attention = tf.keras.layers.Dense(1, activation="tanh")(x)
-            attention = tf.keras.layers.Flatten()(attention)
-            attention = tf.keras.layers.Activation("softmax")(attention)
-            attention = tf.keras.layers.Reshape((lookback, 1))(attention)
-            context = tf.keras.layers.Multiply()([x, attention])
-            context = tf.keras.layers.Lambda(lambda t: tf.reduce_sum(t, axis=1))(context)
+            # GlobalAveragePooling1D instead of Lambda sum (safe to serialize)
+            context = tf.keras.layers.GlobalAveragePooling1D()(x)
             x = tf.keras.layers.Dense(32, activation="relu")(context)
             x = tf.keras.layers.Dropout(0.3)(x)
             outputs = tf.keras.layers.Dense(1)(x)

@@ -535,3 +535,68 @@ def get_trade_history(db: Session = Depends(get_db), current_user: User = Depend
             "time": h.timestamp.strftime("%Y-%m-%d %H:%M") if hasattr(h.timestamp, "strftime") else "Unknown"
         } for h in history
     ]}
+
+
+# ══════════════════════════════════════════════════════════════
+#  CRYPTO ENDPOINTS — ASTRA.CRYPTO ENGINE
+# ══════════════════════════════════════════════════════════════
+
+@router.get("/api/crypto/watchlist")
+def get_crypto_watchlist(
+    market: str = "international",
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns live prices for the crypto watchlist ticker strip.
+    market: 'international' (USD) | 'indian' (INR)
+    """
+    from app.services.crypto_engine import crypto_engine
+    try:
+        prices = crypto_engine.get_watchlist_prices(market=market)
+        return {"market": market, "assets": prices}
+    except Exception as e:
+        logger.error(f"Crypto watchlist failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/crypto/fear-greed")
+def get_fear_greed(current_user: User = Depends(get_current_user)):
+    """Returns the current Fear & Greed Index from Alternative.me."""
+    from app.services.crypto_engine import crypto_engine
+    try:
+        fg = crypto_engine.get_fear_greed()
+        dom = crypto_engine.get_btc_dominance()
+        return {"fear_greed": fg, "btc_dominance": dom}
+    except Exception as e:
+        logger.error(f"Fear & Greed fetch failed: {e}")
+        return {"fear_greed": {"value": 50, "label": "Neutral", "updated": ""}, "btc_dominance": 50.0}
+
+
+@router.get("/api/crypto/analyze/{symbol}")
+def analyze_crypto(
+    symbol: str,
+    market: str = "international",
+    timeframe: str = "1d",
+    engine: str = "astra_crypto",
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Full ASTRA.CRYPTO analysis for a single symbol.
+    symbol:    e.g. BTC-USD, ETH-USD, BTC-INR, ETH-INR
+    market:    'international' | 'indian'
+    timeframe: '1d' | '4h' | '1h'
+    engine:    'astra_crypto' (rule-based) | 'astra_crypto_ml' (LSTM)
+    """
+    from app.services.crypto_engine import crypto_engine
+    try:
+        result = crypto_engine.analyze(
+            symbol=symbol.upper(),
+            market=market,
+            timeframe=timeframe,
+            engine=engine
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Crypto analysis failed for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

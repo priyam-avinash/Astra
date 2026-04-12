@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   BarChart3, Brain, Zap, Briefcase, History, Settings, 
-  Menu, X, Bell, User, LogOut, Activity, LayoutDashboard, DollarSign
+  Menu, X, Bell, User, LogOut, Activity, LayoutDashboard, DollarSign, Bitcoin
 } from 'lucide-react';
 import AIPredictionsView from './AIPredictionsView';
 import AutoModeView from './AutoModeView';
@@ -13,6 +13,7 @@ import ManualTradeView from './ManualTradeView';
 import SettingsView from './SettingsView';
 import LoginView from './LoginView';
 import RegisterView from './RegisterView';
+import CryptoView from './CryptoView';
 
 export default function App() {
   // Bypassing login for now as requested
@@ -23,6 +24,9 @@ export default function App() {
   const [positions, setPositions] = useState([]);
   const [history, setHistory] = useState([]);
   const [queue, setQueue] = useState([]);
+  // Crypto navigation state
+  const [cryptoSymbol, setCryptoSymbol] = useState(null);
+  const [cryptoMarket, setCryptoMarket] = useState('international');
 
   useEffect(() => {
     const fetchPositions = async () => {
@@ -79,6 +83,7 @@ export default function App() {
   const menuItems = [
     { id: 'Dashboard', name: 'Dashboard', icon: <LayoutDashboard size={20} /> },
     { id: 'Deep Analysis', name: 'Deep Analysis', icon: <BarChart3 size={20} /> },
+    { id: 'Crypto', name: 'Crypto', icon: <Bitcoin size={20} /> },
     { id: 'AI Predictions', name: 'AI Predictions', icon: <Brain size={20} /> },
     { id: 'Auto Mode', name: 'Auto Mode', icon: <Zap size={20} /> },
     { id: 'Active Trades', name: 'Active Trades', icon: <Activity size={20} />, badge: positions.length > 0 ? positions.length : null },
@@ -100,7 +105,16 @@ export default function App() {
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'Deep Analysis': return <AnalysisView />;
+      case 'Deep Analysis': return <AnalysisView initialSymbol={cryptoSymbol} initialMarket={cryptoMarket} />;
+      case 'Crypto': return (
+        <CryptoView
+          onNavigateToAnalysis={(symbol, market) => {
+            setCryptoSymbol(symbol);
+            setCryptoMarket(market);
+            setActiveTab('Deep Analysis');
+          }}
+        />
+      );
       case 'AI Predictions': return <AIPredictionsView queue={queue} setQueue={setQueue} />;
       case 'Auto Mode': return <AutoModeView queue={queue} setQueue={setQueue} history={history} setHistory={setHistory} />;
       case 'Active Trades': return <ActiveTradesView positions={positions} setPositions={setPositions} />;
