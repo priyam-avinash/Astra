@@ -102,14 +102,15 @@ def monitor_active_positions():
                         quantity=p.quantity,
                         price=current_price
                     )
-                    
+
                     # Update DB
                     p.status = "CLOSED"
                     p.exit_price = current_price
                     p.exit_time = datetime.utcnow()
-                    
+
                     pnl = (current_price - p.entry_price) * p.quantity if p.direction == "BUY" else (p.entry_price - current_price) * p.quantity
-                    
+                    pnl_pct = ((current_price - p.entry_price) / p.entry_price) * (1 if p.direction == "BUY" else -1) * 100
+
                     new_history = TradeRecord(
                         user_id=p.user_id,
                         trade_id=f"AUTO-{p.id}-{datetime.now().strftime('%M%S')}",
@@ -124,6 +125,37 @@ def monitor_active_positions():
                     db.commit()
                     logger.info(f"AUTO-EXIT: {p.asset} {exit_reason} at {current_price}")
                     results.append(f"Closed {p.asset} due to {exit_reason}")
+
+                    # ── Push to replay buffer for self-learning ──────────────
+                    try:
+                        from app.services.replay_buffer import replay_buffer
+                        entry_features = {}
+                        if hasattr(p, "entry_features_json") and p.entry_features_json:
+                            import json as _json
+                            entry_features = _json.loads(p.entry_features_json)
+                        replay_buffer.push(
+                            symbol=p.asset,
+                            features=entry_features,
+                            outcome={
+                                "pnl_pct":    round(pnl_pct, 3),
+                                "hit_target": "Target" in exit_reason,
+                                "hit_sl":     "Stop" in exit_reason,
+                                "bars_held":  0,   # Could compute from entry_time
+                                "direction":  p.direction,
+                            },
+                            engine=getattr(p, "engine", "unknown"),
+                        )
+                        # Check for drift and schedule emergency retrain if needed
+                        drift = replay_buffer.drift_check()
+                        if drift["drift_detected"]:
+                            logger.warning(
+                                f"🚨 DRIFT DETECTED: recent WR={drift['recent_win_rate']:.1f}% "
+                                f"vs overall={drift['overall_win_rate']:.1f}%. "
+                                f"Consider retraining."
+                            )
+                    except Exception as rb_err:
+                        logger.warning(f"Replay buffer push failed (non-critical): {rb_err}")
+
                 except Exception as e:
                     logger.error(f"Failed to auto-exit {p.asset}: {e}")
                     db.rollback()

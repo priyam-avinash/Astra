@@ -20,7 +20,7 @@ services:
       - "6379:6379"
 
   backend:
-    build: 
+    build:
       context: ./backend
     container_name: astra-backend
     ports:
@@ -31,13 +31,20 @@ services:
       - DATABASE_URL=postgresql://astra:astra_secure_pass@db:5432/astra_trading
       - REDIS_URL=redis://redis:6379/0
       - JWT_SECRET_KEY=super_secret_jwt_key_astra_123
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      - PAPER_TRADING=true
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
     depends_on:
       - db
       - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   worker:
-    build: 
+    build:
       context: ./backend
     container_name: astra-worker
     volumes:
@@ -45,10 +52,27 @@ services:
     environment:
       - DATABASE_URL=postgresql://astra:astra_secure_pass@db:5432/astra_trading
       - REDIS_URL=redis://redis:6379/0
+      - PAPER_TRADING=true
     command: celery -A app.services.tasks.celery_app worker --loglevel=info
     depends_on:
       - db
       - redis
+
+  beat:
+    build:
+      context: ./backend
+    container_name: astra-beat
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://astra:astra_secure_pass@db:5432/astra_trading
+      - REDIS_URL=redis://redis:6379/0
+    command: celery -A app.services.tasks.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    depends_on:
+      - redis
+      - db
+      - backend
+    restart: unless-stopped
       
   frontend:
     build:

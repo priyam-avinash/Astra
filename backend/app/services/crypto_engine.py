@@ -473,20 +473,20 @@ class CryptoEngine:
             elif engine == "astra_crypto_ml":
                 if self.lstm_model is not None and self.lstm_scaler is not None:
                     try:
-                        lookback = 30
+                        lookback = 20  # Matches new classifier lookback
                         feat_data = df[CRYPTO_FEATURE_COLS].tail(lookback).values
                         if len(feat_data) == lookback:
                             scaled = self.lstm_scaler.transform(feat_data)
                             X = scaled.reshape(1, lookback, len(CRYPTO_FEATURE_COLS))
-                            pred = float(self.lstm_model.predict(X, verbose=0)[0][0])
-                            # Crypto needs higher threshold due to noise
-                            threshold = risk_cfg["conf_threshold"]
-                            confidence = float(round(min(abs(pred) * 20.0, 99.0), 1))
-                            if pred > threshold:
+                            probs = self.lstm_model.predict(X, verbose=0)[0]  # [P_DOWN, P_NEUTRAL, P_UP]
+                            pred_class = int(np.argmax(probs))
+                            confidence = float(round(max(probs) * 100, 1))
+                            # Only signal when model is confident (>50% on a class)
+                            if pred_class == 2 and probs[2] > risk_cfg["conf_threshold"]:
                                 signal = "BUY"
-                            elif pred < -threshold:
+                            elif pred_class == 0 and probs[0] > risk_cfg["conf_threshold"]:
                                 signal = "SELL"
-                            strategy_used = "lstm_crypto"
+                            strategy_used = "lstm_crypto_classifier"
                     except Exception as e:
                         logger.warning(f"Crypto LSTM failed: {e}. Falling back to rule-based.")
                         if is_trending:
@@ -627,10 +627,14 @@ class CryptoEngine:
 
     # ─────────────────────── LSTM TRAINING ───────────────────────
 
-    def train_lstm_crypto(self, symbols: list = None, lookback: int = 30):
+    def train_lstm_crypto(self, symbols: list = None, lookback: int = 20):
         """
         Train dedicated Bidirectional LSTM for crypto.
         Trains on multiple coins simultaneously for generalization.
+
+        Target: 3-class direction (0=DOWN, 1=NEUTRAL, 2=UP) using 1.5% threshold.
+        Classification is far more stable than magnitude regression across regime changes.
+        Shorter lookback (20 vs 30) produces more sequences from the same data.
         """
         try:
             import tensorflow as tf
@@ -638,6 +642,8 @@ class CryptoEngine:
 
             if symbols is None:
                 symbols = ["BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD"]
+
+            DIRECTION_THRESHOLD = 1.5  # % — moves below this are NEUTRAL
 
             all_X, all_y = [], []
 
@@ -650,9 +656,12 @@ class CryptoEngine:
                 if len(df) < lookback + 20:
                     continue
 
-                # Target: 3-day forward return in %
-                df["Target"] = df["Close"].pct_change(3).shift(-3) * 100
+                # Target: 3-class direction (DOWN=0, NEUTRAL=1, UP=2)
+                fwd_return = df["Close"].pct_change(3).shift(-3) * 100
+                df["Target"] = np.where(fwd_return > DIRECTION_THRESHOLD, 2,
+                               np.where(fwd_return < -DIRECTION_THRESHOLD, 0, 1))
                 df = df.dropna(subset=CRYPTO_FEATURE_COLS + ["Target"])
+                df["Target"] = df["Target"].astype(int)
 
                 for i in range(lookback, len(df) - 1):
                     all_X.append(df[CRYPTO_FEATURE_COLS].values[i - lookback:i])
@@ -665,68 +674,56 @@ class CryptoEngine:
             X_arr = np.array(all_X)
             y_arr = np.array(all_y)
 
-            # Scale features
             n_samples, n_steps, n_feats = X_arr.shape
-            X_flat = X_arr.reshape(-1, n_feats)
-            scaler = RobustScaler()
-            X_scaled_flat = scaler.fit_transform(X_flat)
-            X_scaled = X_scaled_flat.reshape(n_samples, n_steps, n_feats)
 
-            # Shuffle
-            idx = np.random.permutation(len(X_scaled))
-            X_scaled, y_arr = X_scaled[idx], y_arr[idx]
-
-            split = int(len(X_scaled) * 0.8)
-            X_train, X_val = X_scaled[:split], X_scaled[split:]
+            # Chronological split before scaling (no data leakage)
+            split = int(n_samples * 0.8)
+            X_train_raw, X_val_raw = X_arr[:split], X_arr[split:]
             y_train, y_val = y_arr[:split], y_arr[split:]
 
-            # ── Deep BiLSTM with Attention ──
+            # Fit scaler only on train data
+            scaler = RobustScaler()
+            X_train = scaler.fit_transform(X_train_raw.reshape(-1, n_feats)).reshape(split, n_steps, n_feats)
+            X_val = scaler.transform(X_val_raw.reshape(-1, n_feats)).reshape(n_samples - split, n_steps, n_feats)
+
+            # ── BiLSTM Classifier (3-class: DOWN/NEUTRAL/UP) ──
             inputs = tf.keras.Input(shape=(lookback, n_feats))
             x = tf.keras.layers.Bidirectional(
-                tf.keras.layers.LSTM(256, return_sequences=True, dropout=0.25, recurrent_dropout=0.1)
+                tf.keras.layers.LSTM(128, return_sequences=True, dropout=0.3,
+                                     recurrent_dropout=0.1,
+                                     kernel_regularizer=tf.keras.regularizers.l2(1e-4))
             )(inputs)
             x = tf.keras.layers.Bidirectional(
-                tf.keras.layers.LSTM(128, return_sequences=True, dropout=0.2)
+                tf.keras.layers.LSTM(64, return_sequences=True, dropout=0.2,
+                                     kernel_regularizer=tf.keras.regularizers.l2(1e-4))
             )(x)
-            x = tf.keras.layers.Bidirectional(
-                tf.keras.layers.LSTM(64, return_sequences=True, dropout=0.15)
-            )(x)
-            # Self-Attention
-            attn = tf.keras.layers.Dense(1, activation="tanh")(x)
-            attn = tf.keras.layers.Flatten()(attn)
-            attn = tf.keras.layers.Activation("softmax")(attn)
-            attn = tf.keras.layers.Reshape((lookback, 1))(attn)
-            context = tf.keras.layers.Multiply()([x, attn])
-            context = tf.keras.layers.Lambda(lambda t: tf.reduce_sum(t, axis=1))(context)
-            # Dense head
-            x = tf.keras.layers.Dense(64, activation="relu")(context)
-            x = tf.keras.layers.BatchNormalization()(x)
+            context = tf.keras.layers.GlobalAveragePooling1D()(x)
+            x = tf.keras.layers.Dense(32, activation="relu",
+                                      kernel_regularizer=tf.keras.regularizers.l2(1e-4))(context)
             x = tf.keras.layers.Dropout(0.3)(x)
-            x = tf.keras.layers.Dense(32, activation="relu")(x)
-            x = tf.keras.layers.Dropout(0.2)(x)
-            outputs = tf.keras.layers.Dense(1)(x)
+            outputs = tf.keras.layers.Dense(3, activation="softmax")(x)  # 3-class
 
             model = tf.keras.Model(inputs, outputs)
             model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=5e-4),
-                loss="huber",
-                metrics=["mae"]
+                optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+                loss="sparse_categorical_crossentropy",
+                metrics=["accuracy"]
             )
 
             callbacks = [
-                tf.keras.callbacks.EarlyStopping(patience=20, restore_best_weights=True, monitor="val_loss"),
-                tf.keras.callbacks.ReduceLROnPlateau(factor=0.4, patience=8, min_lr=1e-7),
+                tf.keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True, monitor="val_accuracy"),
+                tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=6, min_lr=1e-6),
             ]
 
             model.fit(
                 X_train, y_train,
                 validation_data=(X_val, y_val),
-                epochs=150,
-                batch_size=64,
+                epochs=100,
+                batch_size=32,
                 callbacks=callbacks,
                 verbose=1
             )
-            logger.info(f"Crypto LSTM trained on {len(X_train)} samples from {len(symbols)} coins")
+            logger.info(f"Crypto LSTM classifier trained on {len(X_train)} samples from {len(symbols)} coins")
             return model, scaler
 
         except ImportError:

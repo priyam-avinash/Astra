@@ -3,30 +3,79 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.models.database import get_db, TradeRecord, TargetSignal, User, ActivePosition
 from app.services.ai_predictor import ai_engine
-from app.services.broker import broker_service
+from app.services.broker import broker_service, PAPER_MODE
 from app.services.auth import verify_password, get_password_hash, create_access_token, SECRET_KEY, ALGORITHM
 from jose import JWTError, jwt
 import os
 import logging
-from datetime import datetime
+import numpy as np
+from datetime import datetime, date
+
+# ── Numpy serialization helper ────────────────────────────────────────────────
+def _sanitize(obj):
+    """Recursively convert numpy scalars/arrays to Python native types so
+    FastAPI's jsonable_encoder never chokes on numpy.bool_ / numpy.int64 etc."""
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(i) for i in obj]
+    return obj
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# ── Global trading state ─────────────────────────────────────────────────────
+_TRADING_HALTED = False
+MAX_POSITIONS   = int(os.getenv("MAX_POSITIONS",  "5"))
+MAX_DAILY_LOSS  = float(os.getenv("MAX_DAILY_LOSS", "10000"))
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/token", auto_error=False)
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    # --- AUTH BYPASS INJECTED AS REQUESTED ---
-    # Automatically creates and returns a mock user to unblock UI testing
+    # --- AUTH BYPASS (intentional for paper-trading phase) ---
     admin_user = db.query(User).filter(User.username == "admin_bypass").first()
     if not admin_user:
         admin_user = User(username="admin_bypass", hashed_password="bypass_hash")
         db.add(admin_user)
         db.commit()
     return admin_user
+
+# ── Kill Switch endpoints (defined AFTER get_current_user) ───────────────────
+@router.get("/api/emergency/status")
+def trading_status(current_user: User = Depends(get_current_user)):
+    return {
+        "halted":         _TRADING_HALTED,
+        "mode":           "PAPER" if PAPER_MODE else "LIVE",
+        "paper_trading":  PAPER_MODE,
+        "max_positions":  MAX_POSITIONS,
+        "max_daily_loss": MAX_DAILY_LOSS,
+    }
+
+@router.post("/api/emergency/halt")
+def halt_trading(current_user: User = Depends(get_current_user)):
+    global _TRADING_HALTED
+    _TRADING_HALTED = True
+    logger.warning(f"⛔ TRADING HALTED by {current_user.username}")
+    return {"halted": True, "message": "All trading halted. No new orders will be placed."}
+
+@router.post("/api/emergency/resume")
+def resume_trading(current_user: User = Depends(get_current_user)):
+    global _TRADING_HALTED
+    _TRADING_HALTED = False
+    logger.info(f"▶ Trading resumed by {current_user.username}")
+    return {"halted": False, "message": "Trading resumed."}
 
 class UserCreate(BaseModel):
     username: str
@@ -69,19 +118,23 @@ def get_ai_signals(db: Session = Depends(get_db), current_user: User = Depends(g
         TargetSignal.user_id == current_user.id
     ).all()
     if not signals:
-        # Seed mock AI signals from static data (no blocking ML training)
+        # Seed mock AI signals — entry_price and target_price are DIFFERENT values
+        # BUY:  target > entry  (profit when price rises)
+        # SELL: target < entry  (profit when price falls)
         mock_seeds = [
-            {"asset": "RELIANCE.NS", "type": "Equity", "signal": "BUY",  "target": 1480.0, "stop_loss": 1350.0, "confidence": 74.2},
-            {"asset": "TCS.NS",      "type": "Equity", "signal": "BUY",  "target": 4050.0, "stop_loss": 3800.0, "confidence": 68.5},
-            {"asset": "HDFCBANK.NS", "type": "Equity", "signal": "SELL", "target": 1580.0, "stop_loss": 1720.0, "confidence": 61.0},
-            {"asset": "GC=F",        "type": "Commodity", "signal": "BUY","target": 2720.0, "stop_loss": 2580.0, "confidence": 71.3},
-            {"asset": "^NSEI",       "type": "F&O",    "signal": "HOLD", "target": 23500.0,"stop_loss": 22000.0,"confidence": 55.0},
+            {"asset": "RELIANCE.NS", "type": "Equity",    "signal": "BUY",  "entry": 1480.0, "target": 1535.0, "stop_loss": 1410.0, "confidence": 74.2, "engine": "astra_ai"},
+            {"asset": "TCS.NS",      "type": "Equity",    "signal": "BUY",  "entry": 4050.0, "target": 4210.0, "stop_loss": 3870.0, "confidence": 68.5, "engine": "astra_ai"},
+            {"asset": "HDFCBANK.NS", "type": "Equity",    "signal": "SELL", "entry": 1580.0, "target": 1510.0, "stop_loss": 1645.0, "confidence": 61.0, "engine": "astra_ml"},
+            {"asset": "GC=F",        "type": "Commodity", "signal": "BUY",  "entry": 2720.0, "target": 2835.0, "stop_loss": 2640.0, "confidence": 71.3, "engine": "astra_ai"},
+            {"asset": "^NSEI",       "type": "F&O",       "signal": "HOLD", "entry": 23500.0,"target": 24400.0,"stop_loss": 22800.0,"confidence": 55.0, "engine": "astra"},
         ]
         for s in mock_seeds:
             new_sig = TargetSignal(
                 user_id=current_user.id,
                 asset=s["asset"], type=s["type"], signal=s["signal"],
-                target_price=s["target"], stop_loss=s["stop_loss"], confidence=s["confidence"]
+                entry_price=s["entry"], target_price=s["target"],
+                stop_loss=s["stop_loss"], confidence=s["confidence"],
+                engine=s["engine"],
             )
             db.add(new_sig)
         db.commit()
@@ -92,14 +145,16 @@ def get_ai_signals(db: Session = Depends(get_db), current_user: User = Depends(g
 
     return {"queue": [
         {
-            "id": s.id,
-            "asset": s.asset,
-            "type": s.type,
-            "signal": s.signal,
-            "targetPrice": s.target_price,
-            "stopLoss": s.stop_loss,
-            "confidence": s.confidence,
-            "age": "Just now"
+            "id":          s.id,
+            "asset":       s.asset,
+            "type":        s.type,
+            "signal":      s.signal,
+            "entryPrice":  s.entry_price,   # ← now returned correctly
+            "targetPrice": s.target_price,  # ← different from entryPrice
+            "stopLoss":    s.stop_loss,
+            "confidence":  s.confidence,
+            "engine":      s.engine or "astra",
+            "age":         "Just now"
         } for s in signals
     ]}
 
@@ -113,7 +168,7 @@ def analyze_symbol(symbol: str, interval: str = "1d", period: str = "6mo", engin
     
     try:
         result = ai_engine.analyze_market_data(symbol.upper(), interval=interval, period=period, engine=engine)
-        return result
+        return _sanitize(result)
     except Exception as e:
         logger.error(f"Analysis failed for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -254,6 +309,84 @@ def get_analysis_status(task_id: str):
     
     return {"status": "processing"}
 
+@router.get("/api/analyze/ensemble/{symbol}")
+def analyze_ensemble(symbol: str, current_user: User = Depends(get_current_user)):
+    """
+    Ensemble signal: runs all 3 equity engines (ASTRA 1.0, RF, LSTM) and returns
+    consensus signal + Kelly-sized position recommendation.
+    Only signals where ≥2/3 engines agree are actionable (CONSENSUS).
+    """
+    from app.services.ai_predictor import ai_engine
+    from collections import Counter
+
+    sym = symbol.upper()
+    engines = ["astra", "astra_ai", "astra_ml"]
+    results = {}
+    signals = []
+
+    for eng in engines:
+        try:
+            r = ai_engine.analyze_market_data(sym, engine=eng)
+            results[eng] = r
+            signals.append(r.get("signal", "HOLD"))
+        except Exception as e:
+            logger.warning(f"Ensemble: {eng} failed for {sym}: {e}")
+            signals.append("HOLD")
+            results[eng] = {"signal": "HOLD", "confidence": 0.0}
+
+    # Tally votes
+    vote_count = Counter(signals)
+    top_signal, top_votes = vote_count.most_common(1)[0]
+    consensus = top_votes >= 2
+
+    # Average confidence across engines that agree
+    agreeing = [results[e]["confidence"] for e, s in zip(engines, signals) if s == top_signal]
+    avg_confidence = round(sum(agreeing) / len(agreeing), 1) if agreeing else 0.0
+
+    # Use first agreeing engine's SL/TP
+    ref = next((results[e] for e, s in zip(engines, signals) if s == top_signal), results["astra"])
+    entry_price = ref.get("entry_price", 0.0)
+    target = ref.get("target", 0.0)
+    stop_loss = ref.get("stop_loss", 0.0)
+
+    # Kelly position sizing (half-Kelly, capped at 15% of capital)
+    kelly_pct = 0.0
+    kelly_note = ""
+    if consensus and top_signal != "HOLD" and entry_price > 0 and stop_loss > 0:
+        avg_win_pct = abs(target - entry_price) / entry_price * 100 if target else 4.0
+        avg_loss_pct = abs(entry_price - stop_loss) / entry_price * 100 if stop_loss else 2.0
+        win_rate = avg_confidence / 100.0
+        b = avg_win_pct / max(avg_loss_pct, 0.1)
+        raw_kelly = win_rate - (1 - win_rate) / b
+        half_kelly = max(0.0, raw_kelly * 0.5)  # Half-Kelly for safety
+        kelly_pct = round(min(half_kelly, 0.15) * 100, 1)  # Cap at 15%
+        kelly_note = f"Deploy {kelly_pct}% of capital (half-Kelly, capped 15%)"
+
+    # Minimum confidence gate — don't signal unless confident
+    MIN_CONSENSUS_CONFIDENCE = 60.0
+    if avg_confidence < MIN_CONSENSUS_CONFIDENCE and top_signal != "HOLD":
+        top_signal = "HOLD"
+        kelly_note = f"Signal suppressed: avg confidence {avg_confidence}% < {MIN_CONSENSUS_CONFIDENCE}% threshold"
+
+    return {
+        "asset": sym,
+        "consensus_signal": top_signal if consensus else "HOLD",
+        "is_consensus": consensus,
+        "votes": vote_count,
+        "avg_confidence": avg_confidence,
+        "kelly_pct": kelly_pct,
+        "kelly_note": kelly_note,
+        "entry_price": entry_price,
+        "target": target,
+        "stop_loss": stop_loss,
+        "weekly_trend": ref.get("weekly_trend", "NEUTRAL"),
+        "macro_trend": ref.get("macro_trend", "BULL"),
+        "engine_breakdown": {
+            e: {"signal": results[e].get("signal"), "confidence": results[e].get("confidence")}
+            for e in engines
+        },
+    }
+
 @router.get("/api/analyze/bulk")
 def analyze_bulk(symbols: str, interval: str = "1d", period: str = "1mo", engine: str = "astra", current_user: User = Depends(get_current_user)):
     """
@@ -287,22 +420,33 @@ def analyze_bulk(symbols: str, interval: str = "1d", period: str = "1mo", engine
 
 class SignalPayload(BaseModel):
     asset: str
-    type: str
     signal: str
-    targetPrice: float
-    stopLoss: float
     confidence: float
+    entry_price: Optional[float] = None   # from scanner / AI engine
+    target_price: Optional[float] = None  # snake_case (scanner sends this)
+    stop_loss: Optional[float] = None
+    # camelCase aliases (legacy / manual push)
+    type: Optional[str] = "Equity"
+    targetPrice: Optional[float] = None
+    stopLoss: Optional[float] = None
+    engine: Optional[str] = "astra"
+    signal_type: Optional[str] = None    # ignored, kept for compat
 
 @router.post("/api/signals")
 def push_ai_signal(signal: SignalPayload, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Normalise camelCase vs snake_case fields from different callers
+    target = signal.target_price or signal.targetPrice or 0.0
+    sl     = signal.stop_loss    or signal.stopLoss    or 0.0
     new_sig = TargetSignal(
         user_id=current_user.id,
         asset=signal.asset,
-        type=signal.type,
+        type=signal.type or "Equity",
         signal=signal.signal,
-        target_price=signal.targetPrice,
-        stop_loss=signal.stopLoss,
-        confidence=signal.confidence
+        entry_price=signal.entry_price or 0.0,
+        target_price=target,
+        stop_loss=sl,
+        confidence=signal.confidence,
+        engine=signal.engine or "astra",
     )
     db.add(new_sig)
     db.commit()
@@ -311,10 +455,33 @@ def push_ai_signal(signal: SignalPayload, db: Session = Depends(get_db), current
 
 @router.post("/api/execute")
 def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # ── Server-side risk guards ───────────────────────────────────────────────
+    if _TRADING_HALTED:
+        raise HTTPException(status_code=503, detail="⛔ Trading is halted. Use /api/emergency/resume to re-enable.")
+
+    open_count = db.query(ActivePosition).filter(
+        ActivePosition.user_id == current_user.id,
+        ActivePosition.status == "OPEN"
+    ).count()
+    if open_count >= MAX_POSITIONS:
+        raise HTTPException(status_code=429, detail=f"Max {MAX_POSITIONS} concurrent positions reached. Close a position first.")
+
+    today_loss = db.query(func.sum(TradeRecord.pnl)).filter(
+        TradeRecord.user_id == current_user.id,
+        func.date(TradeRecord.timestamp) == date.today(),
+        TradeRecord.pnl < 0,
+    ).scalar() or 0.0
+    if today_loss < -MAX_DAILY_LOSS:
+        raise HTTPException(status_code=429, detail=f"Daily loss limit (₹{MAX_DAILY_LOSS:,.0f}) reached. Trading paused for today.")
+
+    if trade.quantity < 1:
+        raise HTTPException(status_code=400, detail="Quantity must be at least 1.")
+    # ─────────────────────────────────────────────────────────────────────────
+
     signal = db.query(TargetSignal).filter(TargetSignal.id == trade.id, TargetSignal.user_id == current_user.id).first()
     if signal:
         signal.status = "Executed"
-    
+
     try:
         result = broker_service.execute_trade(
             asset=trade.asset,
@@ -483,17 +650,20 @@ def square_off_position(position_id: int, db: Session = Depends(get_db), current
     exit_action = "SELL" if pos.direction == "BUY" else "BUY"
     
     try:
-        # Mock logic to get "exit price"
-        import random
-        exit_price = pos.entry_price * (1 + random.uniform(-0.02, 0.05)) 
-        
+        # Use real LTP from the paper trading engine (not random)
+        exit_price = broker_service.get_exit_price(pos.asset, pos.direction)
+        if not exit_price or exit_price <= 0:
+            # Fallback: use last known current_price from AI engine
+            exit_price = ai_engine.get_realtime_price(pos.asset) or pos.entry_price
+
         result = broker_service.execute_trade(
             asset=pos.asset,
             action=exit_action,
             quantity=pos.quantity,
             price=exit_price
         )
-        
+        exit_price = result.get("executed_price", exit_price)
+
         pnl = (exit_price - pos.entry_price) * pos.quantity if pos.direction == "BUY" else (pos.entry_price - exit_price) * pos.quantity
         
         # Update position
@@ -570,6 +740,221 @@ def get_fear_greed(current_user: User = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Fear & Greed fetch failed: {e}")
         return {"fear_greed": {"value": 50, "label": "Neutral", "updated": ""}, "btc_dominance": 50.0}
+
+
+@router.get("/api/scan/universe")
+def scan_universe(
+    engine: str = "astra_ai",
+    top_k: int = 20,
+    min_confidence: float = 55.0,
+    signal_filter: Optional[str] = None,        # "BUY" | "SELL" | None (all)
+    sector: Optional[str] = None,               # filter by sector
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Scan the full NSE universe (NIFTY 500 ~141 symbols) for live signals.
+
+    Returns top_k signals ranked by confidence.
+    - engine: 'astra_ai' (fast, default) | 'astra' (rules) | 'astra_ml' (slow)
+    - min_confidence: minimum confidence % to include (default 55)
+    - signal_filter: 'BUY' or 'SELL' to show only one direction
+    - sector: e.g. 'IT', 'Banking', 'Pharma' — scans only that sector
+    """
+    from app.services.universe_scanner import universe_scanner
+    try:
+        if sector:
+            results = universe_scanner.scan_sector(
+                sector=sector, engines=[engine],
+                top_k=top_k, min_confidence=min_confidence
+            )
+        else:
+            results = universe_scanner.scan(
+                engines=[engine], top_k=top_k, min_confidence=min_confidence
+            )
+        if signal_filter:
+            results = [r for r in results if r.get("signal") == signal_filter.upper()]
+        return {
+            "status": "ok",
+            "engine": engine,
+            "total_signals": len(results),
+            "universe_size": len(universe_scanner.symbols),
+            "signals": results,
+        }
+    except Exception as e:
+        logger.error(f"Universe scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/scan/full")
+def scan_full_consensus(
+    top_k: int = 15,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Two-stage consensus scan:
+    Stage 1: ASTRA.AI on all ~141 symbols → top 30 candidates
+    Stage 2: ASTRA.ML confirmation on those 30
+    Returns signals where both engines agree.
+    Slower (~60–90s) but highest conviction.
+    """
+    from app.services.universe_scanner import universe_scanner
+    try:
+        results = universe_scanner.full_scan(top_k=top_k)
+        return {"status": "ok", "signals": results, "pipeline": "astra_ai→astra_ml"}
+    except Exception as e:
+        logger.error(f"Full consensus scan failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/scan/sectors")
+def get_available_sectors(current_user: User = Depends(get_current_user)):
+    """List all available sectors in the universe."""
+    from app.services.universe_scanner import universe_scanner, _SECTOR_MAP
+    sectors = sorted(set(_SECTOR_MAP.values()))
+    sector_counts = {}
+    for s in sectors:
+        sector_counts[s] = sum(1 for sym in universe_scanner.symbols
+                               if universe_scanner.get_sector(sym) == s)
+    sector_counts["Other"] = sum(1 for sym in universe_scanner.symbols
+                                 if universe_scanner.get_sector(sym) == "Other")
+    return {"sectors": sectors, "counts": sector_counts,
+            "universe_size": len(universe_scanner.symbols)}
+
+
+@router.get("/api/intraday/{symbol}")
+def analyze_intraday(
+    symbol: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Intraday signal for a single NSE stock.
+    Uses 15-minute OHLCV data.
+    Strategies: Opening Range Breakout (ORB) + VWAP Mean Reversion.
+
+    Returns: signal, strategy, entry_price, sl, tp, confidence, time_remaining_min
+    Only generates signals during market hours (09:15 – 14:45 IST).
+    """
+    from app.services.intraday_engine import intraday_engine
+    sym = symbol.upper()
+    if not sym.endswith(".NS"):
+        sym = sym + ".NS"
+    try:
+        result = intraday_engine.analyze_intraday(sym)
+        return result
+    except Exception as e:
+        logger.error(f"Intraday analysis failed for {sym}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/intraday/scan/top")
+def intraday_universe_scan(
+    top_k: int = 10,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Scans NIFTY 50 for intraday signals.
+    Returns top_k signals ranked by confidence.
+    Best called between 09:45 – 14:30 IST.
+    """
+    from app.services.intraday_engine import intraday_engine
+    from app.services.universe_scanner import _NIFTY_50
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    symbols = [s + ".NS" for s in _NIFTY_50]
+    results = []
+
+    def _scan_one(sym):
+        try:
+            r = intraday_engine.analyze_intraday(sym)
+            if r.get("signal") not in ("BUY", "SELL"):
+                return None
+            return r
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futures = {ex.submit(_scan_one, s): s for s in symbols}
+        for fut in as_completed(futures):
+            r = fut.result()
+            if r:
+                results.append(r)
+
+    results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+    return {
+        "status": "ok",
+        "signals": results[:top_k],
+        "scanned": len(symbols),
+        "active_signals": len(results),
+    }
+
+
+@router.get("/api/commodities/list")
+def list_commodities(current_user: User = Depends(get_current_user)):
+    """List all supported commodity symbols with metadata."""
+    from app.services.commodities_engine import COMMODITIES
+    return {"commodities": [
+        {"symbol": sym, **meta} for sym, meta in COMMODITIES.items()
+    ]}
+
+
+@router.get("/api/commodities/analyze/{symbol}")
+def analyze_commodity(
+    symbol: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Full commodity analysis for a single futures contract.
+    Symbols: GC=F (Gold), SI=F (Silver), CL=F (Crude), NG=F (NatGas),
+             HG=F (Copper), ALI=F (Aluminium), ZC=F (Corn), ZW=F (Wheat)
+
+    Returns: signal, confidence, entry_price, stop_loss, target,
+             seasonal_bias, macro context (VIX, DXY), chart_data
+    """
+    from app.services.commodities_engine import commodities_engine
+    try:
+        return commodities_engine.analyze(symbol.upper())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Commodity analysis failed for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/commodities/scan")
+def scan_commodities(
+    signal_filter: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Scan all commodity futures for signals.
+    signal_filter: 'BUY' | 'SELL' | None (return all, sorted by confidence)
+    """
+    from app.services.commodities_engine import commodities_engine
+    results = commodities_engine.scan_all(signal_filter=signal_filter)
+    return {"status": "ok", "signals": results, "total": len(results)}
+
+
+@router.get("/api/learning/buffer/summary")
+def replay_buffer_summary(current_user: User = Depends(get_current_user)):
+    """
+    Replay buffer health check: win rate of recorded experiences,
+    per-engine stats, and drift detection result.
+    """
+    from app.services.replay_buffer import replay_buffer
+    return replay_buffer.summary()
+
+
+@router.get("/api/learning/buffer/drift")
+def check_drift(
+    window: int = 20,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Drift detection: compares recent {window} trades vs overall win rate.
+    If recent WR drops >15pp, flags drift and recommends retraining.
+    """
+    from app.services.replay_buffer import replay_buffer
+    return replay_buffer.drift_check(window=window)
 
 
 @router.get("/api/crypto/analyze/{symbol}")

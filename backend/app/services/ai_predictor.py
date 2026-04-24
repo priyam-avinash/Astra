@@ -93,6 +93,43 @@ class AIPredictionEngine:
             pass
         return self.macro_trend_bullish
 
+    def _get_weekly_trend(self, symbol: str) -> str:
+        """
+        Multi-timeframe filter: check weekly chart trend for a symbol.
+        Returns 'BULL', 'BEAR', or 'NEUTRAL'.
+        Cached per symbol for 4 hours (weekly bars don't change intraday).
+        """
+        cache_key = f"_weekly_{symbol}"
+        cached = getattr(self, "_weekly_cache", {})
+        now = datetime.now()
+        if cache_key in cached:
+            result, ts = cached[cache_key]
+            if (now - ts).total_seconds() < 14400:  # 4-hour TTL
+                return result
+        try:
+            df_w = yf.download(symbol, period="2y", interval="1wk", progress=False, timeout=10)
+            if df_w is not None and not df_w.empty and len(df_w) >= 30:
+                if isinstance(df_w.columns, pd.MultiIndex):
+                    df_w.columns = df_w.columns.get_level_values(0)
+                close = df_w["Close"]
+                sma30w = close.rolling(30).mean().iloc[-1]
+                sma10w = close.rolling(10).mean().iloc[-1]
+                lp = float(close.iloc[-1])
+                if lp > float(sma30w) and float(sma10w) > float(sma30w):
+                    trend = "BULL"
+                elif lp < float(sma30w) and float(sma10w) < float(sma30w):
+                    trend = "BEAR"
+                else:
+                    trend = "NEUTRAL"
+                if not hasattr(self, "_weekly_cache"):
+                    self._weekly_cache = {}
+                self._weekly_cache[cache_key] = (trend, now)
+                logger.info(f"Weekly trend {symbol}: {trend} (price={lp:.2f} vs SMA30w={sma30w:.2f})")
+                return trend
+        except Exception as e:
+            logger.debug(f"Weekly trend check failed for {symbol}: {e}")
+        return "NEUTRAL"
+
     # ─────────────────────── DATA FETCHING ───────────────────────
 
     def _fetch_data(self, symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
@@ -137,14 +174,13 @@ class AIPredictionEngine:
             except Exception as e:
                 logger.debug(f"Twelve Data unavailable: {e}")
 
-        # 2. Alpha Vantage — use 'full' outputsize to get up to 20 years (not 'compact' = 100 days)
+        # 2. Alpha Vantage — free tier only supports 'compact' (100 bars); 'full' requires premium
         try:
-            av_key = os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ")
+            av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
             av_symbol = symbol.replace(".NS", ".BSE")
-            outputsize = "full" if need_full else "compact"
             url = (
                 f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={av_symbol}&apikey={av_key}&outputsize={outputsize}"
+                f"&symbol={av_symbol}&apikey={av_key}&outputsize=compact"
             )
             res = requests.get(url, timeout=8)
             data = res.json()
@@ -226,14 +262,13 @@ class AIPredictionEngine:
             except Exception as e:
                 logger.debug(f"Twelve Data unavailable: {e}")
 
-        # 2. Alpha Vantage (full outputsize)
+        # 2. Alpha Vantage — free tier compact only (100 bars)
         try:
-            av_key = os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ")
+            av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
             av_symbol = symbol.replace(".NS", ".BSE")
-            outputsize = "full" if need_full else "compact"
             url = (
                 f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={av_symbol}&apikey={av_key}&outputsize={outputsize}"
+                f"&symbol={av_symbol}&apikey={av_key}&outputsize=compact"
             )
             res = requests.get(url, timeout=8)
             data = res.json()
@@ -288,8 +323,10 @@ class AIPredictionEngine:
         delta = series.diff()
         gain = delta.clip(lower=0).rolling(period).mean()
         loss = (-delta.clip(upper=0)).rolling(period).mean()
-        rs = gain / loss.replace(0, 0.001)
-        return 100 - (100 / (1 + rs))
+        rs = gain / loss.where(loss != 0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        rsi = rsi.where(loss != 0, 100.0)  # Pure up-trend → RSI = 100
+        return rsi
 
     def _compute_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         tr = pd.concat([
@@ -405,7 +442,11 @@ class AIPredictionEngine:
         # Trend
         df["SMA_10"] = df["Close"].rolling(10).mean()
         df["SMA_30"] = df["Close"].rolling(30).mean()
-        df["SMA_200"] = df["Close"].rolling(200).mean() if len(df) >= 200 else df["SMA_30"]
+        df["SMA_200"] = df["Close"].rolling(200).mean()
+        # When fewer than 200 bars available, back-fill with longest available mean
+        if df["SMA_200"].isna().all():
+            df["SMA_200"] = df["Close"].expanding().mean()
+        df["SMA_200"] = df["SMA_200"].fillna(df["Close"].expanding().mean())
         df["VWAP"] = self._compute_vwap(df)
         df["ATR"] = self._compute_atr(df)
 
@@ -526,6 +567,12 @@ class AIPredictionEngine:
             confidence = 50.0
             mult_sl, mult_tp = 1.5, 3.0  # Default ATR multipliers (2:1 R:R minimum)
 
+            # ── Multi-Timeframe Weekly Trend ──
+            # Only filter equity symbols (skip indices/crypto which use their own macro filters)
+            weekly_trend = "NEUTRAL"
+            if not any(c in asset_symbol for c in ["^", "-USD", "-INR", "=F"]):
+                weekly_trend = self._get_weekly_trend(asset_symbol)
+
             # ── ASTRA 1.0 (Rule-Based Multi-Confirmation) ──
             if engine == "astra":
                 buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
@@ -533,8 +580,16 @@ class AIPredictionEngine:
 
                 if buy_ok and buy_conf > sell_conf:
                     signal, confidence = "BUY", buy_conf
+                    # MTF filter: suppress BUY if weekly is bearish
+                    if weekly_trend == "BEAR":
+                        signal = "HOLD"
+                        confidence = round(confidence * 0.6, 1)
                 elif sell_ok and sell_conf > buy_conf:
                     signal, confidence = "SELL", sell_conf
+                    # MTF filter: suppress SELL if weekly is bullish
+                    if weekly_trend == "BULL":
+                        signal = "HOLD"
+                        confidence = round(confidence * 0.6, 1)
                 else:
                     confidence = max(buy_conf, sell_conf)
 
@@ -545,20 +600,22 @@ class AIPredictionEngine:
                     try:
                         feats = df[FEATURE_COLS].tail(1)
                         pred = float(self.rf_model.predict(feats)[0])
-                        # Dynamic threshold based on current ATR (volatility-adaptive)
                         atr_pct = float(last["Volat_Ratio"])
                         threshold = max(1.2, atr_pct * 0.5)
                         confidence = float(round(min(abs(pred) * 18.0, 99.0), 1))
                         if pred > threshold:
                             signal = "BUY"
-                            if not macro_bull:
+                            # Block BUY if macro bear OR weekly bear
+                            if not macro_bull or weekly_trend == "BEAR":
                                 signal = "HOLD"
                                 confidence *= 0.5
                         elif pred < -threshold:
                             signal = "SELL"
+                            if weekly_trend == "BULL":
+                                signal = "HOLD"
+                                confidence *= 0.5
                     except Exception as e:
                         logger.warning(f"RF model inference failed: {e}")
-                        # Fallback only to ASTRA rules (NOT raw RSI override)
                         buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
                         if buy_ok:
                             signal, confidence = "BUY", buy_conf
@@ -575,15 +632,19 @@ class AIPredictionEngine:
                             X = scaled.reshape(1, lookback, len(FEATURE_COLS))
                             pred = float(self.lstm_model.predict(X, verbose=0)[0][0])
                             atr_pct = float(last["Volat_Ratio"])
-                            threshold = max(0.8, atr_pct * 0.4)
+                            # Lowered from 0.8 → 0.55 to unlock more trades while keeping quality
+                            threshold = max(0.55, atr_pct * 0.35)
                             confidence = float(round(min(abs(pred) * 25.0, 99.0), 1))
                             if pred > threshold:
                                 signal = "BUY"
-                                if not macro_bull:
+                                if not macro_bull or weekly_trend == "BEAR":
                                     signal = "HOLD"
                                     confidence *= 0.6
                             elif pred < -threshold:
                                 signal = "SELL"
+                                if weekly_trend == "BULL":
+                                    signal = "HOLD"
+                                    confidence *= 0.6
                     except Exception as e:
                         logger.warning(f"LSTM inference failed: {e}")
                         buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
@@ -648,6 +709,7 @@ class AIPredictionEngine:
                 "volume_ratio": round(float(last["Volume_Ratio"]), 2),
                 "market_regime": "TRENDING" if is_trending else "RANGING",
                 "macro_trend": "BULL" if macro_bull else "BEAR",
+                "weekly_trend": weekly_trend,
                 "candlestick_patterns": patterns,
                 "confirmations": confirmations,
                 "interval": interval,
@@ -699,10 +761,14 @@ class AIPredictionEngine:
             max_depth=8,
             min_samples_leaf=20,
             random_state=42,
-            n_jobs=-1
+            n_jobs=-1,
+            oob_score=True,
         )
         model.fit(X, y)
-        logger.info(f"RF model trained on {len(X)} samples, {len(FEATURE_COLS)} features")
+        logger.info(
+            f"RF model trained on {len(X)} samples, {len(FEATURE_COLS)} features | "
+            f"OOB R²={model.oob_score_:.4f}"
+        )
         return model
 
     def train_model_lstm(self, df: pd.DataFrame, lookback: int = 30):
@@ -723,21 +789,26 @@ class AIPredictionEngine:
             df["Target"] = df["Close"].pct_change(3).shift(-3) * 100
             df = df.dropna(subset=FEATURE_COLS + ["Target"])
 
-            scaler = RobustScaler()
-            X_scaled = scaler.fit_transform(df[FEATURE_COLS].values)
+            raw_X = df[FEATURE_COLS].values
             y = df["Target"].values
 
-            # Build sequences
+            # Build sequences before scaling (no data leakage)
             X_seq, y_seq = [], []
-            for i in range(lookback, len(X_scaled) - 1):
-                X_seq.append(X_scaled[i - lookback:i])
+            for i in range(lookback, len(raw_X) - 1):
+                X_seq.append(raw_X[i - lookback:i])
                 y_seq.append(y[i])
             X_seq, y_seq = np.array(X_seq), np.array(y_seq)
 
-            # 80/20 train/val split
+            # Chronological 80/20 split
             split = int(len(X_seq) * 0.8)
-            X_train, X_val = X_seq[:split], X_seq[split:]
+            X_train_raw, X_val_raw = X_seq[:split], X_seq[split:]
             y_train, y_val = y_seq[:split], y_seq[split:]
+
+            # Fit scaler only on train data, transform both
+            n_train, n_steps, n_feats = X_train_raw.shape
+            scaler = RobustScaler()
+            X_train = scaler.fit_transform(X_train_raw.reshape(-1, n_feats)).reshape(n_train, n_steps, n_feats)
+            X_val = scaler.transform(X_val_raw.reshape(-1, n_feats)).reshape(X_val_raw.shape[0], n_steps, n_feats)
 
             # ── Bidirectional LSTM with Attention (no Lambda layers) ──
             inputs = tf.keras.Input(shape=(lookback, len(FEATURE_COLS)))

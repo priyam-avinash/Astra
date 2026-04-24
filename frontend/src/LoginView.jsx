@@ -13,7 +13,7 @@ export default function LoginView({ onLogin, onSwitchToRegister }) {
     setError('');
 
     try {
-      const response = await fetch('http://localhost:8000/api/token', {
+      const response = await fetch('http://localhost:8000/api/auth/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ username: email, password: password })
@@ -22,7 +22,7 @@ export default function LoginView({ onLogin, onSwitchToRegister }) {
       if (!response.ok) throw new Error('Invalid email or password');
 
       const data = await response.json();
-      localStorage.setItem('token', data.access_token);
+      localStorage.setItem('astra_token', data.access_token);
       onLogin(data.access_token);
     } catch (err) {
       setError(err.message);

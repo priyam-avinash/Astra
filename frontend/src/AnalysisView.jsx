@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Search, RefreshCw, TrendingUp, TrendingDown, ChevronRight, ZoomIn, ZoomOut, Maximize2, ExternalLink, DollarSign, BarChart3, Target, PieChart, Bitcoin } from 'lucide-react';
-import { createChart, ColorType, CrosshairMode } from 'lightweight-charts';
+import { createChart, ColorType, CrosshairMode, LineStyle } from 'lightweight-charts';
 import FullChartModal from './FullChartModal.jsx';
 
 /* ── STYLES ── */
@@ -324,7 +324,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
     if (!sym) return;
     setLoading(true); setError(''); setData(null); setFin(null);
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('astra_token');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
       const isC = isCrypto(sym);
@@ -361,7 +361,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
 
   const loadInterval = useCallback(async (interval, period) => {
     try {
-      const token = localStorage.getItem('token');
+      const token = localStorage.getItem('astra_token');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const isC = isCrypto(symbol);
       let res;
@@ -410,6 +410,42 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
     const sorted = [...data.chartData].sort((a, b) => (a.time > b.time ? 1 : -1));
     for (const d of sorted) { if (used.has(d.time)) continue; used.add(d.time); candles.push({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close }); volumes.push({ time: d.time, value: d.volume || 0, color: d.close >= d.open ? 'rgba(38,166,154,.35)' : 'rgba(239,83,80,.35)' }); if (d.sma200 != null) smas.push({ time: d.time, value: d.sma200 }); }
     cs.setData(candles); vs.setData(volumes); if (smas.length) sm.setData(smas);
+
+    // ── Signal price lines (entry / target / stop-loss) ──────────────────────
+    const entryP = data.entry_price || data.entryPrice;
+    const targetP = data.target;
+    const slP = data.stop_loss || data.stopLoss;
+    if (entryP && entryP > 0) {
+      cs.createPriceLine({
+        price: entryP,
+        color: '#2962ff',
+        lineWidth: 1.5,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `Entry ₹${Number(entryP).toFixed(2)}`,
+      });
+    }
+    if (targetP && targetP > 0) {
+      cs.createPriceLine({
+        price: targetP,
+        color: '#26a69a',
+        lineWidth: 1.5,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `Target ₹${Number(targetP).toFixed(2)}`,
+      });
+    }
+    if (slP && slP > 0) {
+      cs.createPriceLine({
+        price: slP,
+        color: '#ef5350',
+        lineWidth: 1.5,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `SL ₹${Number(slP).toFixed(2)}`,
+      });
+    }
+
     chart.timeScale().fitContent();
     return () => { try { chart.remove(); } catch {} chartRef.current = null; };
   }, [data]);

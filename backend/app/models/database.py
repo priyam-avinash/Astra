@@ -52,9 +52,11 @@ class TargetSignal(Base):
     asset = Column(String, index=True)
     type = Column(String)
     signal = Column(String)
+    entry_price = Column(Float, nullable=True, default=0.0)   # ← added: price at signal time
     target_price = Column(Float)
     stop_loss = Column(Float)
     confidence = Column(Float)
+    engine = Column(String, nullable=True, default="astra")   # ← added: which engine generated it
     status = Column(String, default="Pending Approval")
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -79,6 +81,28 @@ class ActivePosition(Base):
     owner = relationship("User", back_populates="positions")
 
 Base.metadata.create_all(bind=engine)
+
+# ── SQLite column-migration helper (dev only) ─────────────────────────
+# create_all() won't add new columns to existing tables, so we do it manually.
+def _run_migrations():
+    """Add new columns to existing tables without wiping data."""
+    migrations = [
+        ("active_signals",   "entry_price", "REAL DEFAULT 0.0"),
+        ("active_signals",   "engine",      "TEXT DEFAULT 'astra'"),
+        ("active_positions", "entry_features_json", "TEXT"),
+        ("active_positions", "engine",      "TEXT DEFAULT 'unknown'"),
+    ]
+    with engine.connect() as conn:
+        for table, col, col_type in migrations:
+            try:
+                conn.execute(__import__('sqlalchemy').text(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                ))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists — safe to ignore
+
+_run_migrations()
 
 def get_db():
     db = SessionLocal()
