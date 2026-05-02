@@ -41,6 +41,16 @@ pkill -f "vite"              2>/dev/null && ok "Frontend stopped"  || true
 pkill -f "npm run dev"       2>/dev/null                           || true
 sleep 1
 
+# Force-free ports in case pkill wasn't enough
+for PORT in 8000 5173; do
+  PIDS=$(lsof -ti tcp:$PORT 2>/dev/null)
+  if [ -n "$PIDS" ]; then
+    echo "$PIDS" | xargs kill -9 2>/dev/null
+    ok "Force-freed port $PORT"
+  fi
+done
+sleep 1
+
 # ── Check deps ────────────────────────────────────────────────────────────
 step "Checking dependencies…"
 
@@ -152,12 +162,19 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-# ── Keep running (tail logs to terminal) ──────────────────────────────────
-echo -e "${YELLOW}Live backend log (Ctrl+C to stop):${RESET}"
+# ── Keep running (tail both logs to terminal) ─────────────────────────────
+echo -e "${YELLOW}Live logs (Ctrl+C to stop ASTRA):${RESET}"
 echo ""
-tail -f "$LOG_DIR/backend.log" &
+tail -f "$LOG_DIR/backend.log" "$LOG_DIR/frontend.log" &
 TAIL_PID=$!
 
-wait $BACKEND_PID 2>/dev/null
-kill $TAIL_PID 2>/dev/null
-cleanup
+# Wait until Ctrl+C — uvicorn --reload forks so we can't rely on $BACKEND_PID
+while true; do
+  sleep 5
+  # Auto-exit if both processes have died
+  if ! kill -0 $BACKEND_PID 2>/dev/null && ! kill -0 $FRONTEND_PID 2>/dev/null; then
+    fail "Both servers exited unexpectedly."
+    kill $TAIL_PID 2>/dev/null
+    cleanup
+  fi
+done
