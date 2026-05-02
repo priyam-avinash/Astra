@@ -189,16 +189,41 @@ class CryptoEngine:
             return pd.DataFrame()
 
     def _fetch_yfinance_crypto(self, symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-        """Fallback: yfinance for crypto (good for .INR pairs)."""
+        """Fallback: yfinance for crypto using the circuit-breaker-protected downloader."""
         try:
-            df = yf.download(symbol, period=period, interval=interval,
-                             auto_adjust=True, progress=False, timeout=10)
+            # 1. Try Twelve Data first for crypto (BTC-USD → BTC/USD)
+            td_key = os.getenv("TWELVE_DATA_KEY", "")
+            if td_key and interval == "1d" and "-USD" in symbol:
+                td_sym = symbol.replace("-", "/")
+                size_map = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730}
+                outputsize = size_map.get(period, 365)
+                try:
+                    url = (f"https://api.twelvedata.com/time_series?symbol={td_sym}"
+                           f"&interval=1day&outputsize={outputsize}&apikey={td_key}&format=JSON")
+                    res = requests.get(url, timeout=8)
+                    data = res.json()
+                    if "values" in data and len(data["values"]) > 20:
+                        df_td = pd.DataFrame(data["values"])
+                        df_td["datetime"] = pd.to_datetime(df_td["datetime"])
+                        df_td = df_td.set_index("datetime").sort_index()
+                        df_td = df_td.rename(columns={"open": "Open", "high": "High",
+                                                       "low": "Low", "close": "Close",
+                                                       "volume": "Volume"})
+                        df_td = df_td[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+                        logger.info(f"Twelve Data crypto OK for {symbol}: {len(df_td)} bars")
+                        return df_td
+                except Exception as e:
+                    logger.debug(f"Twelve Data crypto failed for {symbol}: {e}")
+
+            # 2. yfinance with circuit-breaker protection
+            from app.services.ai_predictor import _yf_download_safe
+            df = _yf_download_safe(symbol, period=period, interval=interval, timeout_sec=6)
             if df is not None and not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
                 return df
         except Exception as e:
-            logger.error(f"yfinance crypto fetch failed for {symbol}: {e}")
+            logger.error(f"Crypto data fetch failed for {symbol}: {e}")
         return pd.DataFrame()
 
     def fetch_data(self, symbol: str, market: str = "international",
@@ -575,6 +600,13 @@ class CryptoEngine:
                 "atr": round(at, 4),
                 "engine": engine,
                 "chartData": chart_data,
+                "data_freshness_note": (
+                    "⚠️  Data Rate-Limit Notice: To preserve API quotas, prices are cached up to 60 s "
+                    "and OHLCV bars up to 4 h. Entry / SL / TP levels shown are indicative — "
+                    "always confirm the live market price before executing any trade."
+                ),
+                "price_cache_ttl_sec": 60,
+                "ohlcv_cache_ttl_hr": 4,
             }
 
         except Exception as e:
@@ -596,10 +628,10 @@ class CryptoEngine:
                     change = ticker.get("percentage", 0.0) or 0.0
                 else:
                     yf_sym = info.get("yf_symbol", symbol)
-                    t = yf.Ticker(yf_sym)
-                    fast = t.fast_info
-                    price = getattr(fast, "last_price", 0.0) or 0.0
-                    change = getattr(fast, "regular_market_change_percent", 0.0) or 0.0
+                    # Use circuit-breaker-protected price fetch
+                    from app.services.ai_predictor import ai_engine as _ai
+                    price = _ai.get_realtime_price(yf_sym) or 0.0
+                    change = 0.0  # Change % not available without yfinance.fast_info
 
                 results.append({
                     "symbol": symbol,

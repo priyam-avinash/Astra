@@ -14,6 +14,10 @@ import logging
 import numpy as np
 from datetime import datetime, date
 
+# ── Financials cache (5-min TTL) — prevents repeated yf.Ticker.info calls ────
+_FINANCIALS_CACHE: dict = {}   # key: symbol → (data_dict, datetime)
+_FINANCIALS_CACHE_TTL = 300    # 5 minutes
+
 # ── Numpy serialization helper ────────────────────────────────────────────────
 def _sanitize(obj):
     """Recursively convert numpy scalars/arrays to Python native types so
@@ -194,6 +198,15 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
         sym = symbol.upper()
         if "." not in sym and "^" not in sym and "=" not in sym:
             sym = sym + ".NS"
+
+        # ── Cache check (5-min TTL) ───────────────────────────────────────────
+        _cache_entry = _FINANCIALS_CACHE.get(sym)
+        if _cache_entry:
+            _cached_data, _cached_ts = _cache_entry
+            if (datetime.now() - _cached_ts).total_seconds() < _FINANCIALS_CACHE_TTL:
+                logger.debug(f"Financials cache hit for {sym}")
+                return _cached_data
+
         ticker = yf.Ticker(sym)
         info = ticker.info or {}
         
@@ -269,7 +282,7 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
             "numberOfAnalystOpinions": safe(info.get("numberOfAnalystOpinions")),
         }
         
-        return {
+        result = {
             "symbol": symbol.upper(),
             "profile": profile,
             "keyFacts": key_facts,
@@ -277,6 +290,8 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
             "growth": growth,
             "forecasts": forecasts,
         }
+        _FINANCIALS_CACHE[sym] = (result, datetime.now())
+        return result
     except Exception as e:
         logger.error(f"Financials fetch failed for {symbol}: {e}")
         return {

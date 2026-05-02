@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import useLivePrices from './hooks/useLivePrices';
 import {
   BarChart3, Brain, Zap, Briefcase, History, Settings,
   Menu, X, Bell, User, LogOut, Activity, LayoutDashboard,
@@ -100,6 +101,9 @@ export default function App() {
   // Global LLM toggle
   const [llmGlobalOn, setLlmGlobalOn]   = useState(false);
 
+  // Live price WebSocket
+  const { isLive } = useLivePrices();
+
   // Market open timer
   useEffect(() => {
     const t = setInterval(() => setMarketOpen(isMarketOpen()), 60_000);
@@ -161,8 +165,8 @@ export default function App() {
       } catch (_) {}
     };
     fetchPositions(); fetchOther();
-    const p = setInterval(fetchPositions, 5000);
-    const o = setInterval(fetchOther, 10_000);
+    const p = setInterval(fetchPositions, 15_000);  // reduced from 5s → 15s to save API quota
+    const o = setInterval(fetchOther, 30_000);       // reduced from 10s → 30s
     return () => { clearInterval(p); clearInterval(o); };
   }, []);
 
@@ -315,6 +319,20 @@ export default function App() {
               <Brain size={13} />
               {llmGlobalOn ? 'AI Agents ON' : 'AI Agents'}
             </button>
+
+            {/* Price feed status */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <style>{`@keyframes ws-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.55;transform:scale(1.25)} }`}</style>
+              <span style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: isLive ? '#22c55e' : '#6b7280',
+                display: 'inline-block', flexShrink: 0,
+                animation: isLive ? 'ws-pulse 1.4s ease-in-out infinite' : 'none',
+              }}/>
+              <span style={{ fontSize: 11, fontWeight: 700, color: isLive ? '#22c55e' : '#6b7280', letterSpacing: '0.04em' }}>
+                {isLive ? 'LIVE' : 'DELAYED'}
+              </span>
+            </div>
 
             {/* Quick Scan CTA */}
             <button className="btn-secondary" onClick={runQuickScan} style={{ fontSize: '12px', padding: '6px 14px' }}>

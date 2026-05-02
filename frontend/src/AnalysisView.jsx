@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Search, RefreshCw, TrendingUp, TrendingDown, ChevronRight, ZoomIn, ZoomOut, Maximize2, ExternalLink, DollarSign, BarChart3, Target, PieChart, Bitcoin } from 'lucide-react';
+import useLivePrices from './hooks/useLivePrices';
 import { createChart, ColorType, CrosshairMode, LineStyle } from 'lightweight-charts';
 import FullChartModal from './FullChartModal.jsx';
 import AgentPanel from './components/AgentPanel.jsx';
@@ -309,6 +310,17 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
   const [showFullChart, setShowFullChart] = useState(false);
   const chartContainerRef = useRef(null);
   const chartRef = useRef(null);
+  const abortCtrlRef = useRef(null);  // AbortController for in-flight analysis requests
+
+  // ── Live price WebSocket ───────────────────────────────────────────
+  const { prices, isLive, subscribe } = useLivePrices();
+
+  // Subscribe to live ticks whenever we get a fresh analysis result
+  useEffect(() => {
+    if (data && symbol) subscribe(symbol);
+  }, [data, symbol, subscribe]);
+
+  const livePrice = prices[symbol]?.price || data?.current_price;
 
   // ── Agent Panel state ──────────────────────────────────────────────
   const [llmEnabled, setLlmEnabled]             = useState(false);
@@ -357,12 +369,15 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
   // Re-fetch lessons whenever symbol changes
   useEffect(() => { if (symbol) fetchLessons(symbol); }, [symbol]);
 
-  // Update symbol/market if parent navigation changes
+  // Update symbol/market if parent navigation changes, then analyze immediately.
+  // Pass sym DIRECTLY to analyze() — avoids the stale-closure double-fire where
+  // analyze() ran with the old symbol because setSymbol() hadn't flushed yet.
   useEffect(() => {
-    if (initialSymbol) {
-      setSymbol(initialSymbol);
-      if (initialMarket) setCryptoMarket(initialMarket);
-    }
+    const sym = initialSymbol || 'RELIANCE';
+    setSymbol(sym);
+    if (initialMarket) setCryptoMarket(initialMarket);
+    analyze(sym, engine, initialMarket || cryptoMarket);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSymbol, initialMarket]);
 
   const isCryptoMode = isCrypto(symbol);
@@ -370,10 +385,17 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
   const analyze = useCallback(async (sym, eng, mkt) => {
     sym = sym || symbol; eng = eng || engine; mkt = mkt || cryptoMarket;
     if (!sym) return;
+
+    // Cancel any in-flight request before starting a new one
+    if (abortCtrlRef.current) abortCtrlRef.current.abort();
+    const ctrl = new AbortController();
+    abortCtrlRef.current = ctrl;
+
     setLoading(true); setError(''); setData(null); setFin(null);
     try {
       const token = localStorage.getItem('astra_token');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const signal = ctrl.signal;
 
       const isC = isCrypto(sym);
       let payload;
@@ -383,7 +405,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
         const cryptoEngine = eng.startsWith('astra_crypto') ? eng : 'astra_crypto';
         const res = await fetch(
           `http://localhost:8000/api/crypto/analyze/${sym}?market=${mkt}&engine=${cryptoEngine}`,
-          { headers }
+          { headers, signal }
         );
         if (!res.ok) throw new Error(`Server returned ${res.status}`);
         const json = await res.json();
@@ -392,8 +414,8 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
       } else {
         // Route to equity endpoint
         const [resA, resF] = await Promise.all([
-          fetch(`http://localhost:8000/api/analyze/${sym}?engine=${eng}`, { headers }),
-          fetch(`http://localhost:8000/api/financials/${sym}`, { headers }),
+          fetch(`http://localhost:8000/api/analyze/${sym}?engine=${eng}`, { headers, signal }),
+          fetch(`http://localhost:8000/api/financials/${sym}`, { headers, signal }),
         ]);
         if (!resA.ok) throw new Error(`Server returned ${resA.status}`);
         const json = await resA.json();
@@ -403,7 +425,10 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
       }
 
       setData(payload);
-    } catch (e) { setError(e.message || 'Connection failed'); }
+    } catch (e) {
+      if (e.name === 'AbortError') return;  // Silently drop cancelled requests
+      setError(e.message || 'Connection failed');
+    }
     finally { setLoading(false); }
   }, [symbol, engine, cryptoMarket]);
 
@@ -425,7 +450,6 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
     } catch (e) { console.error('Interval load failed:', e); }
   }, [symbol, engine, cryptoMarket]);
 
-  useEffect(() => { analyze(); }, [initialSymbol]);
   const handleSubmit = (e) => { e.preventDefault(); analyze(symbol, engine, cryptoMarket); };
   const switchEngine = (eng) => { setEngine(eng); analyze(symbol, eng, cryptoMarket); };
 
@@ -576,13 +600,40 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 32, fontWeight: 700, color: '#fff', letterSpacing: -1 }}>₹{data.current_price?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
-                <div style={{ fontSize: 14, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4, color: kd.positive ? '#26a69a' : '#ef5350' }}>
+                <div style={{ fontSize: 32, fontWeight: 700, color: '#fff', letterSpacing: -1 }}>₹{livePrice?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: isLive ? '#22c55e' : '#f59e0b',
+                              background: isLive ? '#22c55e22' : '#f59e0b22',
+                              padding: '2px 8px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 4,
+                              marginBottom: 2 }}>
+                  {isLive ? '● LIVE' : '⏱ ~60s cached'}
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, color: kd.positive ? '#26a69a' : '#ef5350', justifyContent: 'flex-end' }}>
                   {kd.positive ? <TrendingUp size={14}/> : <TrendingDown size={14}/>}
                   {kd.positive ? '+' : ''}{kd.diff} ({kd.pct}%)
                 </div>
               </div>
             </div>
+
+            {/* ── DATA FRESHNESS NOTICE — always visible on every audit report ── */}
+            {data.data_freshness_note && (
+              <div style={{
+                display: 'flex', alignItems: 'flex-start', gap: 10,
+                background: 'rgba(251,191,36,.07)', border: '1px solid rgba(251,191,36,.35)',
+                borderRadius: 8, padding: '10px 14px',
+              }}>
+                <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>⚠️</span>
+                <div>
+                  <span style={{ color: '#fbbf24', fontWeight: 700, fontSize: 12, letterSpacing: '.04em', textTransform: 'uppercase' }}>
+                    Data Rate-Limit Notice
+                  </span>
+                  <p style={{ margin: '3px 0 0', color: '#fde68a', fontSize: 12, lineHeight: 1.5 }}>
+                    To preserve free-tier API quotas, <strong>prices are cached up to 60 s</strong> and{' '}
+                    <strong>OHLCV bars (RSI / MACD / ADX) up to 4 h</strong>. Entry / SL / TP levels
+                    shown are indicative — <strong>always confirm the live market price before executing any trade.</strong>
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* TABS */}
             <div style={S.tabBar}>
