@@ -80,7 +80,7 @@ class AIPredictionEngine:
         if self.macro_trend_updated and (now - self.macro_trend_updated).total_seconds() < 3600:
             return self.macro_trend_bullish
         try:
-            df = yf.download("^NSEI", period="1y", interval="1d", progress=False, timeout=8)
+            df = yf.download("^NSEI", period="1y", interval="1d", progress=False, timeout=4)
             if not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -107,7 +107,7 @@ class AIPredictionEngine:
             if (now - ts).total_seconds() < 14400:  # 4-hour TTL
                 return result
         try:
-            df_w = yf.download(symbol, period="2y", interval="1wk", progress=False, timeout=10)
+            df_w = yf.download(symbol, period="2y", interval="1wk", progress=False, timeout=4)
             if df_w is not None and not df_w.empty and len(df_w) >= 30:
                 if isinstance(df_w.columns, pd.MultiIndex):
                     df_w.columns = df_w.columns.get_level_values(0)
@@ -177,32 +177,38 @@ class AIPredictionEngine:
         # 2. Alpha Vantage — free tier only supports 'compact' (100 bars); 'full' requires premium
         try:
             av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
-            av_symbol = symbol.replace(".NS", ".BSE")
-            url = (
-                f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={av_symbol}&apikey={av_key}&outputsize=compact"
-            )
-            res = requests.get(url, timeout=8)
-            data = res.json()
-            if "Time Series (Daily)" in data:
-                ts = data["Time Series (Daily)"]
-                df_av = pd.DataFrame.from_dict(ts, orient="index")
-                df_av = df_av.rename(columns={
-                    "1. open": "Open", "2. high": "High",
-                    "3. low": "Low", "4. close": "Close", "5. volume": "Volume"
-                })
-                df_av.index = pd.to_datetime(df_av.index)
-                df_av = df_av.astype(float).sort_index()
-                if len(df_av) > 20:
-                    logger.info(f"AlphaVantage feed OK for {symbol}: {len(df_av)} bars")
-                    return df_av
+            bare = symbol.replace(".NS", "").replace(".BSE", "").split("-")[0]
+            # Try multiple symbol formats: bare symbol first, then exchange-suffixed
+            av_candidates = [bare, bare + ".BSE", bare + ".NSE"]
+            for av_sym in av_candidates:
+                try:
+                    url = (
+                        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
+                        f"&symbol={av_sym}&apikey={av_key}&outputsize=compact"
+                    )
+                    res = requests.get(url, timeout=8)
+                    data = res.json()
+                    if "Time Series (Daily)" in data:
+                        ts = data["Time Series (Daily)"]
+                        df_av = pd.DataFrame.from_dict(ts, orient="index")
+                        df_av = df_av.rename(columns={
+                            "1. open": "Open", "2. high": "High",
+                            "3. low": "Low", "4. close": "Close", "5. volume": "Volume"
+                        })
+                        df_av.index = pd.to_datetime(df_av.index)
+                        df_av = df_av.astype(float).sort_index()
+                        if len(df_av) > 20:
+                            logger.info(f"AlphaVantage feed OK for {symbol} (as {av_sym}): {len(df_av)} bars")
+                            return df_av
+                except Exception:
+                    continue
         except Exception as e:
             logger.debug(f"AlphaVantage unavailable: {e}")
 
         # 2. yfinance primary
         try:
             df = yf.download(symbol, period=period, interval=interval,
-                             auto_adjust=True, progress=False, timeout=10)
+                             auto_adjust=True, progress=False, timeout=4)
             if df is not None and not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -215,7 +221,7 @@ class AIPredictionEngine:
         if ".NS" not in symbol and "^" not in symbol and "=" not in symbol and "-" not in symbol:
             try:
                 df = yf.download(symbol + ".NS", period=period, interval=interval,
-                                 auto_adjust=True, progress=False, timeout=10)
+                                 auto_adjust=True, progress=False, timeout=4)
                 if df is not None and not df.empty:
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = df.columns.get_level_values(0)
@@ -265,33 +271,38 @@ class AIPredictionEngine:
         # 2. Alpha Vantage — free tier compact only (100 bars)
         try:
             av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
-            av_symbol = symbol.replace(".NS", ".BSE")
-            url = (
-                f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={av_symbol}&apikey={av_key}&outputsize=compact"
-            )
-            res = requests.get(url, timeout=8)
-            data = res.json()
-            if "Time Series (Daily)" in data:
-                ts = data["Time Series (Daily)"]
-                df_av = pd.DataFrame.from_dict(ts, orient="index")
-                df_av = df_av.rename(columns={
-                    "1. open": "Open", "2. high": "High",
-                    "3. low": "Low", "4. close": "Close", "5. volume": "Volume"
-                })
-                df_av.index = pd.to_datetime(df_av.index)
-                df_av = df_av.astype(float).sort_index()
-                if len(df_av) > 20:
-                    cache_put(symbol, df_av, interval)
-                    logger.info(f"AlphaVantage feed OK for {symbol}: {len(df_av)} bars")
-                    return df_av
+            bare = symbol.replace(".NS", "").replace(".BSE", "").split("-")[0]
+            av_candidates = [bare, bare + ".BSE", bare + ".NSE"]
+            for av_sym in av_candidates:
+                try:
+                    url = (
+                        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
+                        f"&symbol={av_sym}&apikey={av_key}&outputsize=compact"
+                    )
+                    res = requests.get(url, timeout=8)
+                    data = res.json()
+                    if "Time Series (Daily)" in data:
+                        ts = data["Time Series (Daily)"]
+                        df_av = pd.DataFrame.from_dict(ts, orient="index")
+                        df_av = df_av.rename(columns={
+                            "1. open": "Open", "2. high": "High",
+                            "3. low": "Low", "4. close": "Close", "5. volume": "Volume"
+                        })
+                        df_av.index = pd.to_datetime(df_av.index)
+                        df_av = df_av.astype(float).sort_index()
+                        if len(df_av) > 20:
+                            cache_put(symbol, df_av, interval)
+                            logger.info(f"AlphaVantage feed OK for {symbol} (as {av_sym}): {len(df_av)} bars")
+                            return df_av
+                except Exception:
+                    continue
         except Exception as e:
             logger.debug(f"AlphaVantage unavailable: {e}")
 
         # 3. yfinance primary
         try:
             df = yf.download(symbol, period=period, interval=interval,
-                             auto_adjust=True, progress=False, timeout=10)
+                             auto_adjust=True, progress=False, timeout=4)
             if df is not None and not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
@@ -305,7 +316,7 @@ class AIPredictionEngine:
         if ".NS" not in symbol and "^" not in symbol and "=" not in symbol and "-" not in symbol:
             try:
                 df = yf.download(symbol + ".NS", period=period, interval=interval,
-                                 auto_adjust=True, progress=False, timeout=10)
+                                 auto_adjust=True, progress=False, timeout=4)
                 if df is not None and not df.empty:
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = df.columns.get_level_values(0)
@@ -726,17 +737,47 @@ class AIPredictionEngine:
             }
 
     def get_realtime_price(self, symbol: str) -> float:
+        # 1. Try yfinance fast_info
         try:
             ticker = yf.Ticker(symbol)
             fast = ticker.fast_info
             price = getattr(fast, "last_price", None) or fast.get("lastPrice")
-            if price:
+            if price and float(price) > 0:
                 return round(float(price), 2)
             df = ticker.history(period="1d")
             if not df.empty:
                 return round(float(df.iloc[-1]["Close"]), 2)
         except Exception:
             pass
+
+        # 2. Fallback: use latest close from cached/fetched data
+        try:
+            df = self._fetch_data(symbol, period="1mo", interval="1d")
+            if not df.empty:
+                return round(float(df.iloc[-1]["Close"]), 2)
+        except Exception:
+            pass
+
+        # 3. Alpha Vantage GLOBAL_QUOTE for real-time price
+        try:
+            av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
+            bare = symbol.replace(".NS", "").replace(".BSE", "").split("-")[0]
+            for av_sym in [bare, bare + ".BSE"]:
+                try:
+                    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={av_sym}&apikey={av_key}"
+                    res = requests.get(url, timeout=6)
+                    data = res.json()
+                    gq = data.get("Global Quote", {})
+                    price_str = gq.get("05. price", "")
+                    if price_str:
+                        p = float(price_str)
+                        if p > 0:
+                            return round(p, 2)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         return 0.0
 
     # ─────────────────────── MODEL TRAINING HELPERS ───────────────────────

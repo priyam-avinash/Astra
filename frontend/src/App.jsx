@@ -129,7 +129,7 @@ export default function App() {
       await fetch('http://localhost:8000/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ llm_enabled: String(next) }),
+        body: JSON.stringify({ settings: { llm_enabled: String(next) } }),
       });
     } catch (_) { setLlmGlobalOn(!next); } // revert on failure
   };
