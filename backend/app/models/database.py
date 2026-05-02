@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
 import os
@@ -35,12 +35,16 @@ class TradeRecord(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     trade_id = Column(String, unique=True, index=True)
     asset = Column(String, index=True)
-    action = Column(String) 
+    action = Column(String)
     price = Column(Float)
     quantity = Column(Integer)
     pnl = Column(Float, default=0.0)
     status = Column(String, default="Executed")
     timestamp = Column(DateTime, default=datetime.utcnow)
+    # ── Continuous learning fields ──────────────────────────────────────
+    reflection       = Column(Text,    nullable=True)   # LLM reflection text
+    reflection_at    = Column(DateTime, nullable=True)  # when reflection was generated
+    outcome_return_pct = Column(Float, nullable=True)   # % return for this trade
 
     owner = relationship("User", back_populates="trades")
 
@@ -52,13 +56,26 @@ class TargetSignal(Base):
     asset = Column(String, index=True)
     type = Column(String)
     signal = Column(String)
-    entry_price = Column(Float, nullable=True, default=0.0)   # ← added: price at signal time
+    entry_price = Column(Float, nullable=True, default=0.0)
     target_price = Column(Float)
     stop_loss = Column(Float)
     confidence = Column(Float)
-    engine = Column(String, nullable=True, default="astra")   # ← added: which engine generated it
+    engine = Column(String, nullable=True, default="astra")
     status = Column(String, default="Pending Approval")
     created_at = Column(DateTime, default=datetime.utcnow)
+    # ── Multi-agent enrichment fields ───────────────────────────────────
+    llm_enriched         = Column(Boolean,  default=False, nullable=True)
+    news_sentiment       = Column(String,   nullable=True)   # POSITIVE/NEGATIVE/NEUTRAL/MIXED
+    news_summary         = Column(Text,     nullable=True)
+    fundamental_score    = Column(Float,    nullable=True)
+    fundamental_grade    = Column(String,   nullable=True)   # A/B/C/D/F
+    debate_verdict       = Column(String,   nullable=True)   # CONFIRMED/DOWNGRADED/REJECTED
+    debate_text          = Column(Text,     nullable=True)   # JSON of full debate
+    risk_verdict         = Column(String,   nullable=True)   # GREEN/AMBER/RED
+    risk_text            = Column(Text,     nullable=True)   # JSON of portfolio decision
+    recommended_position_pct = Column(Float, nullable=True)
+    gated_by             = Column(String,   nullable=True)   # news/fundamentals/debate/portfolio_manager
+    gate_reason          = Column(Text,     nullable=True)
 
     owner = relationship("User", back_populates="signals")
 
@@ -80,6 +97,28 @@ class ActivePosition(Base):
 
     owner = relationship("User", back_populates="positions")
 
+class AppSettings(Base):
+    """Key-value store for app configuration (API keys, feature toggles, etc.)"""
+    __tablename__ = "app_settings"
+
+    id         = Column(Integer,  primary_key=True, index=True)
+    key        = Column(String,   unique=True, nullable=False, index=True)
+    value      = Column(Text,     nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentMemory(Base):
+    """Persistent lessons extracted by the ReflectorAgent for continuous learning."""
+    __tablename__ = "agent_memory"
+
+    id              = Column(Integer,  primary_key=True, index=True)
+    symbol          = Column(String,   nullable=False, index=True)
+    memory_type     = Column(String,   default="ticker_lesson")  # ticker_lesson / cross_ticker
+    content         = Column(Text,     nullable=False)
+    source_trade_id = Column(Integer,  ForeignKey("trade_history.id"), nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+
 Base.metadata.create_all(bind=engine)
 
 # ── SQLite column-migration helper (dev only) ─────────────────────────
@@ -87,10 +126,28 @@ Base.metadata.create_all(bind=engine)
 def _run_migrations():
     """Add new columns to existing tables without wiping data."""
     migrations = [
-        ("active_signals",   "entry_price", "REAL DEFAULT 0.0"),
-        ("active_signals",   "engine",      "TEXT DEFAULT 'astra'"),
-        ("active_positions", "entry_features_json", "TEXT"),
-        ("active_positions", "engine",      "TEXT DEFAULT 'unknown'"),
+        # Original columns
+        ("active_signals",   "entry_price",       "REAL DEFAULT 0.0"),
+        ("active_signals",   "engine",             "TEXT DEFAULT 'astra'"),
+        ("active_positions", "entry_features_json","TEXT"),
+        ("active_positions", "engine",             "TEXT DEFAULT 'unknown'"),
+        # v1.8 — multi-agent enrichment on active_signals
+        ("active_signals",   "llm_enriched",            "INTEGER DEFAULT 0"),
+        ("active_signals",   "news_sentiment",           "TEXT"),
+        ("active_signals",   "news_summary",             "TEXT"),
+        ("active_signals",   "fundamental_score",        "REAL"),
+        ("active_signals",   "fundamental_grade",        "TEXT"),
+        ("active_signals",   "debate_verdict",           "TEXT"),
+        ("active_signals",   "debate_text",              "TEXT"),
+        ("active_signals",   "risk_verdict",             "TEXT"),
+        ("active_signals",   "risk_text",                "TEXT"),
+        ("active_signals",   "recommended_position_pct", "REAL"),
+        ("active_signals",   "gated_by",                 "TEXT"),
+        ("active_signals",   "gate_reason",              "TEXT"),
+        # v1.8 — continuous learning on trade_history
+        ("trade_history",    "reflection",          "TEXT"),
+        ("trade_history",    "reflection_at",       "TEXT"),
+        ("trade_history",    "outcome_return_pct",  "REAL"),
     ]
     with engine.connect() as conn:
         for table, col, col_type in migrations:

@@ -1,9 +1,80 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { TrendingUp, TrendingDown, Activity, DollarSign, Wallet, RefreshCw } from 'lucide-react';
+import { TrendingUp, TrendingDown, Activity, DollarSign, Wallet, RefreshCw, ChevronDown, ChevronUp, Brain } from 'lucide-react';
 
 const API = 'http://localhost:8000';
 const fmt = (n) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 const fmtPct = (n) => `${n >= 0 ? '+' : ''}${Number(n || 0).toFixed(2)}%`;
+
+// ── Trade History Table with expandable ASTRA reflections ────────────────────
+function TradeHistoryTable({ history }) {
+  const [expanded, setExpanded] = useState({});
+  const toggle = (i) => setExpanded(prev => ({ ...prev, [i]: !prev[i] }));
+
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+      <thead>
+        <tr style={{ background: 'var(--bg-elevated)' }}>
+          {['Asset', 'Action', 'Qty', 'Price', 'P&L', 'Status', 'Time', ''].map((h, i) => (
+            <th key={i} style={{ padding: '10px 20px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {history.slice(0, 20).map((h, i) => {
+          const pnl = h.pnl || 0;
+          const isOpen = expanded[i];
+          const hasReflection = !!h.reflection;
+          return (
+            <React.Fragment key={i}>
+              <tr style={{ borderBottom: isOpen ? 'none' : '1px solid var(--border-subtle)', fontSize: 13, background: isOpen ? 'rgba(59,130,246,0.04)' : undefined }}>
+                <td style={{ padding: '12px 20px', fontWeight: 600 }}>{h.asset?.replace('.NS', '').split(' ')[0]}</td>
+                <td style={{ padding: '12px 20px' }}>
+                  <span className={`badge badge-${h.action?.toLowerCase().split(' ')[0]}`}>{h.action}</span>
+                </td>
+                <td style={{ padding: '12px 20px', fontVariantNumeric: 'tabular-nums' }}>{h.quantity?.toLocaleString()}</td>
+                <td style={{ padding: '12px 20px', fontVariantNumeric: 'tabular-nums' }}>₹{Number(h.price || 0).toFixed(2)}</td>
+                <td style={{ padding: '12px 20px', fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {pnl !== 0 ? `${pnl >= 0 ? '+' : ''}${fmt(pnl)}` : '—'}
+                </td>
+                <td style={{ padding: '12px 20px', fontSize: 11, color: 'var(--text-tertiary)' }}>{h.status}</td>
+                <td style={{ padding: '12px 20px', fontSize: 11, color: 'var(--text-tertiary)' }}>{h.time || h.timestamp || '—'}</td>
+                <td style={{ padding: '12px 20px' }}>
+                  {hasReflection && (
+                    <button
+                      onClick={() => toggle(i)}
+                      title="ASTRA Reflection"
+                      style={{ display: 'flex', alignItems: 'center', gap: 4, background: isOpen ? 'rgba(59,130,246,0.15)' : 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: 6, padding: '3px 8px', cursor: 'pointer', fontSize: 11, fontWeight: 600, color: isOpen ? '#3b82f6' : 'var(--text-secondary)', whiteSpace: 'nowrap' }}
+                    >
+                      <Brain size={11} /> {isOpen ? <ChevronUp size={11}/> : <ChevronDown size={11}/>}
+                    </button>
+                  )}
+                </td>
+              </tr>
+              {isOpen && hasReflection && (
+                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                  <td colSpan={8} style={{ padding: '0 20px 16px 20px' }}>
+                    <div style={{ background: 'rgba(59,130,246,0.07)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 8, padding: '12px 16px', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                      <Brain size={14} color="#3b82f6" style={{ flexShrink: 0, marginTop: 1 }} />
+                      <div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>ASTRA Reflection</div>
+                        <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>{h.reflection}</div>
+                        {h.outcome_return_pct != null && (
+                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6 }}>
+                            Return: <span style={{ color: h.outcome_return_pct >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>{fmtPct(h.outcome_return_pct)}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
 
 // ── Charts ─────────────────────────────────────────────────────────────────
 const DonutChart = ({ data }) => {
@@ -294,36 +365,7 @@ export default function PortfolioView() {
             <span style={{ fontSize: 13, fontWeight: 600 }}>Closed Trades</span>
             <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{history.length} trades</span>
           </div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-            <thead>
-              <tr style={{ background: 'var(--bg-elevated)' }}>
-                {['Asset', 'Action', 'Qty', 'Price', 'P&L', 'Status', 'Time'].map(h => (
-                  <th key={h} style={{ padding: '10px 20px', fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {history.slice(0, 20).map((h, i) => {
-                const pnl = h.pnl || 0;
-                return (
-                  <tr key={i} style={{ borderBottom: '1px solid var(--border-subtle)', fontSize: 13 }}>
-                    <td style={{ padding: '12px 20px', fontWeight: 600 }}>{h.asset?.replace('.NS', '').split(' ')[0]}</td>
-                    <td style={{ padding: '12px 20px' }}>
-                      <span className={`badge badge-${h.action?.toLowerCase()}`}>{h.action}</span>
-                    </td>
-                    <td style={{ padding: '12px 20px', fontVariantNumeric: 'tabular-nums' }}>{h.quantity?.toLocaleString()}</td>
-                    <td style={{ padding: '12px 20px', fontVariantNumeric: 'tabular-nums' }}>₹{Number(h.price || 0).toFixed(2)}</td>
-                    <td style={{ padding: '12px 20px', fontWeight: 700, fontVariantNumeric: 'tabular-nums',
-                      color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                      {pnl !== 0 ? `${pnl >= 0 ? '+' : ''}${fmt(pnl)}` : '—'}
-                    </td>
-                    <td style={{ padding: '12px 20px', fontSize: 11, color: 'var(--text-tertiary)' }}>{h.status}</td>
-                    <td style={{ padding: '12px 20px', fontSize: 11, color: 'var(--text-tertiary)' }}>{h.time || h.timestamp || '—'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <TradeHistoryTable history={history} />
         </div>
       )}
     </div>

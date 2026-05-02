@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.models.database import get_db, TradeRecord, TargetSignal, User, ActivePosition
+from app.models.database import get_db, TradeRecord, TargetSignal, User, ActivePosition, AppSettings, AgentMemory
 from app.services.ai_predictor import ai_engine
 from app.services.broker import broker_service, PAPER_MODE
 from app.services.auth import verify_password, get_password_hash, create_access_token, SECRET_KEY, ALGORITHM
@@ -984,4 +984,211 @@ def analyze_crypto(
     except Exception as e:
         logger.error(f"Crypto analysis failed for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  SETTINGS ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+
+# Settings keys that contain API keys (masked in GET responses)
+_SECRET_KEYS = {"anthropic_api_key", "groq_api_key"}
+
+# All valid setting keys with their defaults
+_SETTING_DEFAULTS = {
+    "llm_enabled":              "false",
+    "anthropic_api_key":        "",
+    "groq_api_key":             "",
+    "auto_execute_mode":        "advisory",   # advisory | auto
+    "auto_execute_threshold":   "GREEN",      # GREEN | AMBER_GREEN
+    "always_debate":            "false",
+    "max_debate_rounds":        "1",
+    "max_risk_rounds":          "1",
+}
+
+
+def _mask(key: str, value: str) -> str:
+    """Mask API keys — show only last 4 chars."""
+    if not value:
+        return ""
+    if key in _SECRET_KEYS and len(value) > 4:
+        return "•" * (len(value) - 4) + value[-4:]
+    return value
+
+
+@router.get("/api/settings")
+def get_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all app settings. API keys are masked."""
+    rows = db.query(AppSettings).all()
+    stored = {r.key: r.value for r in rows}
+
+    result = {}
+    for key, default in _SETTING_DEFAULTS.items():
+        raw_value = stored.get(key, default) or default
+        result[key] = _mask(key, raw_value)
+
+    # Append provider status from LLM router
+    try:
+        from app.services.llm_router import LLMRouter
+        status = LLMRouter().provider_status()
+        result["provider_status"] = status
+    except Exception:
+        result["provider_status"] = {"active_provider": "none", "llm_available": False}
+
+    return result
+
+
+class SettingsUpdate(BaseModel):
+    settings: dict   # {key: value} pairs to update
+
+
+@router.put("/api/settings")
+def update_settings(
+    payload: SettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update one or more settings. API keys are stored as-is (not hashed)."""
+    updated = []
+    for key, value in payload.settings.items():
+        if key not in _SETTING_DEFAULTS:
+            continue   # ignore unknown keys
+        # Don't overwrite a real key with a masked placeholder
+        if key in _SECRET_KEYS and value and all(c == "•" for c in value[:-4]):
+            continue
+        row = db.query(AppSettings).filter(AppSettings.key == key).first()
+        if row:
+            row.value = str(value) if value is not None else ""
+            row.updated_at = datetime.utcnow()
+        else:
+            row = AppSettings(key=key, value=str(value) if value is not None else "")
+            db.add(row)
+        updated.append(key)
+    db.commit()
+
+    # Invalidate LLM router singletons so new keys take effect immediately
+    try:
+        import app.services.llm_router as lr
+        lr._fast_router  = None
+        lr._smart_router = None
+    except Exception:
+        pass
+
+    return {"updated": updated, "message": f"{len(updated)} setting(s) saved."}
+
+
+@router.get("/api/settings/provider-status")
+def provider_status(current_user: User = Depends(get_current_user)):
+    """Quick check: which LLM provider is active."""
+    try:
+        from app.services.llm_router import LLMRouter
+        return LLMRouter().provider_status()
+    except Exception as e:
+        return {"active_provider": "none", "llm_available": False, "error": str(e)}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  AGENT ENRICHMENT ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+
+class EnrichRequest(BaseModel):
+    llm_override:          Optional[bool] = None   # None = use global setting
+    auto_execute_override: Optional[str]  = None   # "advisory" / "auto" / None
+
+
+@router.post("/api/analyze/{symbol}/enrich")
+def enrich_signal(
+    symbol: str,
+    payload: EnrichRequest,
+    engine: str = "astra",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Run the full multi-agent pipeline on a symbol.
+    First runs the ML engine, then enriches with LLM agents.
+    Returns the complete enriched signal (may take 15-30 seconds with LLM).
+    """
+    import json as _json
+    from app.services.agent_pipeline import agent_pipeline
+
+    # Step 1: ML analysis
+    try:
+        base = ai_engine.analyze_market_data(symbol.upper(), engine=engine)
+        base = _sanitize(base)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ML analysis failed: {e}")
+
+    # Step 2: Agent enrichment
+    try:
+        enriched = agent_pipeline.run(
+            symbol=symbol.upper(),
+            base_signal=base,
+            db=db,
+            llm_override=payload.llm_override,
+            auto_execute_override=payload.auto_execute_override,
+        )
+    except Exception as e:
+        logger.error(f"Agent pipeline failed for {symbol}: {e}")
+        enriched = base   # degrade gracefully
+
+    return enriched
+
+
+@router.get("/api/agent/memories/{symbol}")
+def get_agent_memories(
+    symbol: str,
+    limit: int = 10,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return ASTRA's learned lessons for a symbol."""
+    rows = (
+        db.query(AgentMemory)
+        .filter(AgentMemory.symbol == symbol.upper())
+        .order_by(AgentMemory.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "symbol":  symbol.upper(),
+        "lessons": [
+            {
+                "id":         r.id,
+                "content":    r.content,
+                "type":       r.memory_type,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/api/agent/memories")
+def get_all_agent_memories(
+    limit: int = 20,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return all recent lessons across all symbols."""
+    rows = (
+        db.query(AgentMemory)
+        .order_by(AgentMemory.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "lessons": [
+            {
+                "id":         r.id,
+                "symbol":     r.symbol,
+                "content":    r.content,
+                "type":       r.memory_type,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
 

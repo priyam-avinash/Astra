@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Search, RefreshCw, TrendingUp, TrendingDown, ChevronRight, ZoomIn, ZoomOut, Maximize2, ExternalLink, DollarSign, BarChart3, Target, PieChart, Bitcoin } from 'lucide-react';
 import { createChart, ColorType, CrosshairMode, LineStyle } from 'lightweight-charts';
 import FullChartModal from './FullChartModal.jsx';
+import AgentPanel from './components/AgentPanel.jsx';
 
 /* ── STYLES ── */
 const S = {
@@ -309,6 +310,53 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
   const chartContainerRef = useRef(null);
   const chartRef = useRef(null);
 
+  // ── Agent Panel state ──────────────────────────────────────────────
+  const [llmEnabled, setLlmEnabled]             = useState(false);
+  const [autoExecOverride, setAutoExecOverride] = useState('advisory');
+  const [agentLoading, setAgentLoading]         = useState(false);
+  const [enrichedData, setEnrichedData]         = useState(null);
+  const [lessons, setLessons]                   = useState([]);
+
+  const fetchLessons = useCallback(async (sym) => {
+    try {
+      const token = localStorage.getItem('astra_token');
+      const h = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await fetch(`http://localhost:8000/api/agent/memories/${sym || symbol}`, { headers: h });
+      if (res.ok) { const d = await res.json(); setLessons(d.memories || []); }
+    } catch (_) {}
+  }, [symbol]);
+
+  const runAgentAnalysis = useCallback(async () => {
+    if (!symbol || !data) return;
+    setAgentLoading(true);
+    setEnrichedData(null);
+    try {
+      const token = localStorage.getItem('astra_token');
+      const h = { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+      const res = await fetch(`http://localhost:8000/api/analyze/${symbol}/enrich`, {
+        method: 'POST',
+        headers: h,
+        body: JSON.stringify({
+          base_signal: data.signal,
+          confidence: data.confidence,
+          entry_price: data.entry_price,
+          stop_loss: data.stop_loss,
+          target_price: data.target,
+          llm_override: llmEnabled,
+          auto_execute_override: autoExecOverride,
+        }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        setEnrichedData(d);
+      }
+    } catch (e) { console.error('Agent analysis failed:', e); }
+    finally { setAgentLoading(false); }
+  }, [symbol, data, llmEnabled, autoExecOverride]);
+
+  // Re-fetch lessons whenever symbol changes
+  useEffect(() => { if (symbol) fetchLessons(symbol); }, [symbol]);
+
   // Update symbol/market if parent navigation changes
   useEffect(() => {
     if (initialSymbol) {
@@ -590,6 +638,23 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
 
             {/* FORECASTS */}
             {activeTab === 'Forecasts' && <ForecastsTab fin={fin} currentPrice={data.current_price}/>}
+
+            {/* ── AGENT PANEL ────────────────────────────────────── */}
+            <AgentPanel
+              symbol={symbol}
+              llmEnabled={llmEnabled}
+              onToggleLLM={() => {
+                const next = !llmEnabled;
+                setLlmEnabled(next);
+                if (next && !enrichedData) runAgentAnalysis();
+              }}
+              autoExecOverride={autoExecOverride}
+              onToggleAutoExec={() => setAutoExecOverride(v => v === 'advisory' ? 'auto' : 'advisory')}
+              loading={agentLoading}
+              enrichedData={enrichedData}
+              lessons={lessons}
+              onRunAnalysis={runAgentAnalysis}
+            />
           </>
         )}
       </div>

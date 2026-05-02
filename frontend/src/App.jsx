@@ -97,6 +97,9 @@ export default function App() {
   // Kill switch state
   const [halted, setHalted]             = useState(false);
 
+  // Global LLM toggle
+  const [llmGlobalOn, setLlmGlobalOn]   = useState(false);
+
   // Market open timer
   useEffect(() => {
     const t = setInterval(() => setMarketOpen(isMarketOpen()), 60_000);
@@ -110,6 +113,26 @@ export default function App() {
       .then(d => { if (d) setHalted(d.halted); })
       .catch(() => {});
   }, []);
+
+  // Read LLM enabled state on mount
+  useEffect(() => {
+    fetch('http://localhost:8000/api/settings')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.settings?.llm_enabled) setLlmGlobalOn(d.settings.llm_enabled === 'true'); })
+      .catch(() => {});
+  }, []);
+
+  const toggleLlm = async () => {
+    const next = !llmGlobalOn;
+    setLlmGlobalOn(next);
+    try {
+      await fetch('http://localhost:8000/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ llm_enabled: String(next) }),
+      });
+    } catch (_) { setLlmGlobalOn(!next); } // revert on failure
+  };
 
   const toggleHalt = async () => {
     const endpoint = halted ? '/api/emergency/resume' : '/api/emergency/halt';
@@ -273,6 +296,24 @@ export default function App() {
               title={halted ? 'Resume trading' : 'Emergency halt — stop all new orders'}
             >
               {halted ? '▶ Resume' : '⏹ Halt'}
+            </button>
+
+            {/* Global LLM Agent Toggle */}
+            <button
+              onClick={toggleLlm}
+              title={llmGlobalOn ? 'Multi-Agent Pipeline ON — click to disable' : 'Multi-Agent Pipeline OFF — click to enable'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                background: llmGlobalOn ? 'rgba(59,130,246,0.15)' : 'transparent',
+                border: `1px solid ${llmGlobalOn ? '#3b82f6' : 'var(--border-subtle)'}`,
+                color: llmGlobalOn ? '#3b82f6' : 'var(--text-secondary)',
+                borderRadius: 'var(--radius-md)', cursor: 'pointer',
+                padding: '5px 11px', fontSize: 12, fontWeight: 600,
+                transition: 'all 0.2s',
+              }}
+            >
+              <Brain size={13} />
+              {llmGlobalOn ? 'AI Agents ON' : 'AI Agents'}
             </button>
 
             {/* Quick Scan CTA */}

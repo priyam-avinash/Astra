@@ -446,6 +446,47 @@ export default function AutoModeView({ queue, setQueue, history, setHistory }) {
                   />
                 </div>
 
+                {/* Agent verdict badges */}
+                {(trade.risk_verdict || trade.debate_verdict || trade.news_sentiment) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    {trade.risk_verdict && (() => {
+                      const rv = trade.risk_verdict;
+                      const rvColor = rv === 'GREEN' ? '#26a69a' : rv === 'AMBER' ? '#ffa726' : '#ef5350';
+                      const rvBg   = rv === 'GREEN' ? 'rgba(38,166,154,.12)' : rv === 'AMBER' ? 'rgba(255,167,38,.12)' : 'rgba(239,83,80,.12)';
+                      return (
+                        <span title="Portfolio Manager risk verdict" style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4, background: rvBg, color: rvColor, border: `1px solid ${rvColor}33`, letterSpacing: '0.05em' }}>
+                          ⚖ {rv}
+                        </span>
+                      );
+                    })()}
+                    {trade.debate_verdict && (() => {
+                      const dv = trade.debate_verdict;
+                      const dvColor = dv === 'CONFIRMED' ? '#26a69a' : dv === 'DOWNGRADED' ? '#ffa726' : '#ef5350';
+                      const dvBg   = dv === 'CONFIRMED' ? 'rgba(38,166,154,.12)' : dv === 'DOWNGRADED' ? 'rgba(255,167,38,.12)' : 'rgba(239,83,80,.12)';
+                      return (
+                        <span title="Bull/Bear debate verdict" style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4, background: dvBg, color: dvColor, border: `1px solid ${dvColor}33`, letterSpacing: '0.05em' }}>
+                          🗣 {dv}
+                        </span>
+                      );
+                    })()}
+                    {trade.news_sentiment && (() => {
+                      const ns = trade.news_sentiment;
+                      const nsColor = ns === 'POSITIVE' ? '#26a69a' : ns === 'NEGATIVE' ? '#ef5350' : '#787b86';
+                      const nsBg   = ns === 'POSITIVE' ? 'rgba(38,166,154,.12)' : ns === 'NEGATIVE' ? 'rgba(239,83,80,.12)' : 'rgba(120,123,134,.12)';
+                      return (
+                        <span title="News sentiment" style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4, background: nsBg, color: nsColor, border: `1px solid ${nsColor}33`, letterSpacing: '0.05em' }}>
+                          📰 {ns}
+                        </span>
+                      );
+                    })()}
+                    {trade.gate_reason && (
+                      <span title={`Gated by ${trade.gated_by}`} style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4, background: 'rgba(239,83,80,.12)', color: '#ef5350', border: '1px solid rgba(239,83,80,.2)', letterSpacing: '0.05em', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        🚫 {trade.gate_reason}
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* Trade levels + allocation breakdown */}
                 {(() => {
                   const tp  = Number(trade.targetPrice) || 0;
