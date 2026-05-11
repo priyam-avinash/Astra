@@ -519,6 +519,21 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
         db.add(new_trade)
 
         # 2. Create interactive active position for P&L tracking
+        # Snapshot the 20-indicator feature vector at this exact moment for self-learning
+        features_json = None
+        engine_used   = getattr(trade, "engine", "unknown") or "unknown"
+        try:
+            from app.services.ai_predictor import ai_engine, FEATURE_COLS
+            import json as _json
+            _raw = ai_engine._fetch_data(trade.asset.upper())
+            if _raw is not None and not _raw.empty:
+                _feats = ai_engine._compute_features(_raw)
+                if not _feats.empty:
+                    last_row = _feats[FEATURE_COLS].dropna().iloc[-1]
+                    features_json = _json.dumps({k: round(float(v), 6) for k, v in last_row.items()})
+        except Exception as _fe:
+            logger.debug(f"Feature snapshot failed for {trade.asset}: {_fe}")
+
         new_pos = ActivePosition(
             user_id=current_user.id,
             asset=trade.asset,
@@ -527,10 +542,12 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
             quantity=trade.quantity,
             target_price=trade.target_price,
             stop_loss=trade.stop_loss,
-            status="OPEN"
+            status="OPEN",
+            entry_features_json=features_json,
+            engine=engine_used,
         )
         db.add(new_pos)
-        
+
         db.commit()
         return result
     except Exception as e:
@@ -834,6 +851,46 @@ def get_available_sectors(current_user: User = Depends(get_current_user)):
                                  if universe_scanner.get_sector(sym) == "Other")
     return {"sectors": sectors, "counts": sector_counts,
             "universe_size": len(universe_scanner.symbols)}
+
+
+@router.get("/api/model/learning-stats")
+def model_learning_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """
+    Return self-learning pipeline stats: labelled trade counts, accuracy,
+    RF OOB R², last retrain date. Powers the Model Learning card in IntradayView.
+    """
+    try:
+        from app.models.database import TradeRecord
+        import pathlib, joblib as _jl
+
+        total   = db.query(TradeRecord).filter(TradeRecord.signal_label.isnot(None)).count()
+        correct = db.query(TradeRecord).filter(TradeRecord.signal_label == "CORRECT").count()
+        incorr  = db.query(TradeRecord).filter(TradeRecord.signal_label == "INCORRECT").count()
+        acc     = round(correct / (correct + incorr) * 100, 1) if (correct + incorr) > 0 else None
+
+        # RF OOB score from live model
+        rf_oob, last_retrain = None, None
+        rf_path = pathlib.Path("app/models/saved_models/astra_rf.joblib")
+        if rf_path.exists():
+            try:
+                rf = _jl.load(rf_path)
+                rf_oob = round(float(getattr(rf, "oob_score_", 0) or 0), 4)
+                import time as _t
+                mtime = rf_path.stat().st_mtime
+                last_retrain = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pass
+
+        return {
+            "total_labelled": total,
+            "correct":        correct,
+            "incorrect":      incorr,
+            "accuracy_pct":   acc,
+            "rf_oob":         rf_oob,
+            "last_retrain":   last_retrain,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/intraday/scan/top")

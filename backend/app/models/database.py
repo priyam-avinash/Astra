@@ -42,9 +42,11 @@ class TradeRecord(Base):
     status = Column(String, default="Executed")
     timestamp = Column(DateTime, default=datetime.utcnow)
     # ── Continuous learning fields ──────────────────────────────────────
-    reflection       = Column(Text,    nullable=True)   # LLM reflection text
-    reflection_at    = Column(DateTime, nullable=True)  # when reflection was generated
-    outcome_return_pct = Column(Float, nullable=True)   # % return for this trade
+    reflection          = Column(Text,    nullable=True)   # LLM reflection text
+    reflection_at       = Column(DateTime, nullable=True)  # when reflection was generated
+    outcome_return_pct  = Column(Float,   nullable=True)   # % return for this trade
+    entry_features_json = Column(Text,    nullable=True)   # JSON of 20-feature vector at entry
+    signal_label        = Column(String,  nullable=True)   # "CORRECT" | "INCORRECT" | "NEUTRAL"
 
     owner = relationship("User", back_populates="trades")
 
@@ -94,6 +96,9 @@ class ActivePosition(Base):
     entry_time = Column(DateTime, default=datetime.utcnow)
     exit_price = Column(Float, nullable=True)
     exit_time = Column(DateTime, nullable=True)
+    # ── Self-learning: feature snapshot at entry time ────────────────────
+    entry_features_json = Column(Text, nullable=True)  # JSON dict of 20 indicator values
+    engine              = Column(String, nullable=True, default="unknown")  # which engine fired
 
     owner = relationship("User", back_populates="positions")
 
@@ -148,6 +153,9 @@ def _run_migrations():
         ("trade_history",    "reflection",          "TEXT"),
         ("trade_history",    "reflection_at",       "TEXT"),
         ("trade_history",    "outcome_return_pct",  "REAL"),
+        # v1.12 — self-learning feature capture
+        ("trade_history",    "entry_features_json", "TEXT"),
+        ("trade_history",    "signal_label",        "TEXT"),
     ]
     with engine.connect() as conn:
         for table, col, col_type in migrations:

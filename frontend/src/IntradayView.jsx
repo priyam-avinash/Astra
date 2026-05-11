@@ -583,6 +583,68 @@ export default function IntradayView() {
           </div>
         )}
       </div>
+
+      {/* ── Model Learning Card ──────────────────────────────────────── */}
+      <ModelLearningCard />
+
+    </div>
+  );
+}
+
+// ── Self-learning status card ─────────────────────────────────────────────────
+
+function ModelLearningCard() {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(`${API}/api/model/learning-stats`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { setStats(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const card = {
+    background: 'var(--card-bg)',
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+    padding: '16px 20px',
+    marginTop: 20,
+  };
+
+  return (
+    <div style={card}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+        <Activity size={15} color="var(--accent)" />
+        <span style={{ fontWeight: 700, fontSize: 13 }}>Model Learning</span>
+        <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+          Updates every Sunday 2am IST · run <code style={{ fontSize: 9, background: 'rgba(255,255,255,0.06)', padding: '1px 5px', borderRadius: 4 }}>python retrain_from_trades.py</code> manually
+        </span>
+      </div>
+
+      {loading ? (
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>Loading…</div>
+      ) : stats === null ? (
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+          No learning data yet. Execute trades to start accumulating feedback.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+          {[
+            { label: 'Labelled Trades',   value: stats.total_labelled ?? '—' },
+            { label: 'Correct Signals',   value: stats.correct ?? '—',   color: '#10b981' },
+            { label: 'Incorrect Signals', value: stats.incorrect ?? '—', color: '#ef4444' },
+            { label: 'Accuracy',          value: stats.accuracy_pct != null ? `${stats.accuracy_pct}%` : '—', color: '#818cf8' },
+            { label: 'Current RF OOB R²', value: stats.rf_oob != null ? stats.rf_oob.toFixed(3) : '—' },
+            { label: 'Last Retrained',    value: stats.last_retrain ?? 'Never' },
+          ].map(({ label, value, color }) => (
+            <div key={label} style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: '10px 14px' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{label}</div>
+              <div style={{ fontWeight: 800, fontSize: 18, color: color || 'var(--text-primary)' }}>{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

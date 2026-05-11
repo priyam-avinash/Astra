@@ -84,14 +84,38 @@ def reflect_on_closed_trade(
             db=db,
         )
 
-        # Store reflection on the TradeRecord
+        # Store reflection + label closed trade for self-learning
         trade = db.query(TradeRecord).filter(TradeRecord.id == trade_id).first()
         if trade:
-            trade.reflection      = reflection_text
-            trade.reflection_at   = datetime.utcnow()
+            trade.reflection         = reflection_text
+            trade.reflection_at      = datetime.utcnow()
             trade.outcome_return_pct = round(pnl_pct, 3)
+
+            # Derive signal label: was the original signal direction correct?
+            if pnl_pct > 0.003:          # > 0.3% gain — clearly correct
+                trade.signal_label = "CORRECT"
+            elif pnl_pct < -0.003:       # > 0.3% loss — clearly wrong
+                trade.signal_label = "INCORRECT"
+            else:
+                trade.signal_label = "NEUTRAL"  # scratch / noise
+
+            # Copy entry features from the matching ActivePosition (if captured)
+            try:
+                from app.models.database import ActivePosition
+                pos = db.query(ActivePosition).filter(
+                    ActivePosition.asset   == symbol,
+                    ActivePosition.status  != "OPEN",
+                ).order_by(ActivePosition.exit_time.desc()).first()
+                if pos and pos.entry_features_json:
+                    trade.entry_features_json = pos.entry_features_json
+            except Exception as _fe:
+                logger.debug(f"Feature copy failed for trade {trade_id}: {_fe}")
+
             db.commit()
-            logger.info(f"Reflection stored for trade {trade_id} ({symbol}): {reflection_text[:60]}…")
+            logger.info(
+                f"Trade {trade_id} ({symbol}) labelled {trade.signal_label} "
+                f"({pnl_pct:+.2%}). Reflection: {reflection_text[:60]}…"
+            )
 
         return {"trade_id": trade_id, "symbol": symbol, "reflection": reflection_text}
 
