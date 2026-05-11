@@ -348,7 +348,38 @@ class AIPredictionEngine:
         except Exception as e:
             logger.debug(f"AlphaVantage unavailable: {e}")
 
-        # 2. yfinance primary (hard-capped at 5s via thread)
+        # 3. Yahoo Finance direct (custom UA — bypasses yfinance library DNS issues)
+        try:
+            from app.services.yahoo_finance import yahoo_service
+            # Build proper .NS symbol for Indian stocks
+            yf_sym = symbol
+            if not any(x in symbol for x in [".NS", ".BSE", "-USD", "-INR", "^", "="]):
+                yf_sym = symbol + ".NS"
+            df_yf = yahoo_service.get_ohlcv(yf_sym, period=period, interval=interval)
+            if df_yf is not None and not df_yf.empty and len(df_yf) > 20:
+                cache_put(symbol, df_yf, interval)
+                logger.info(f"Yahoo direct OK for {symbol} ({yf_sym}): {len(df_yf)} bars [{interval}]")
+                return df_yf
+        except Exception as e:
+            logger.debug(f"Yahoo direct failed for {symbol}: {e}")
+
+        # 3b. NSE India direct OHLCV — free, no key, daily bars only, Indian stocks
+        #     Used when Yahoo is rate-limited (429). Requires session warmup.
+        if interval == "1d":
+            try:
+                from app.services.yahoo_finance import get_nse_ohlcv
+                # Map period string to approximate calendar days
+                _days_map = {"1mo": 45, "3mo": 100, "6mo": 200, "1y": 380, "2y": 740, "5y": 1850}
+                nse_days = _days_map.get(period, 200)
+                df_nse = get_nse_ohlcv(symbol, days=nse_days)
+                if df_nse is not None and not df_nse.empty and len(df_nse) > 20:
+                    cache_put(symbol, df_nse, interval)
+                    logger.info(f"NSE direct OHLCV OK for {symbol}: {len(df_nse)} bars")
+                    return df_nse
+            except Exception as e:
+                logger.debug(f"NSE direct OHLCV failed for {symbol}: {e}")
+
+        # 4. yfinance library (last resort — circuit-breaker protected)
         try:
             df = _yf_download_safe(symbol, period=period, interval=interval, timeout_sec=5)
             if df is not None and not df.empty:
@@ -360,20 +391,7 @@ class AIPredictionEngine:
         except Exception:
             pass
 
-        # 3. yfinance with .NS suffix for Indian stocks
-        if ".NS" not in symbol and "^" not in symbol and "=" not in symbol and "-" not in symbol:
-            try:
-                df = _yf_download_safe(symbol + ".NS", period=period, interval=interval, timeout_sec=5)
-                if df is not None and not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    if len(df) > 20:
-                        cache_put(symbol, df, interval)
-                        return df
-            except Exception:
-                pass
-
-        # 4. Data exhaust - all sources failed
+        # 5. Data exhaust - all sources failed
         logger.warning(f"⚠️  Data fetch exhausted for {symbol}. Proceeding with empty set.")
         return pd.DataFrame()
 
@@ -816,7 +834,32 @@ class AIPredictionEngine:
         if cached_price is not None:
             return cached_price
 
-        # 1. Try yfinance fast_info (hard-capped via thread + circuit breaker)
+        # 1. NSE India direct (live quote, no auth, no key)
+        try:
+            from app.services.yahoo_finance import get_nse_quote
+            clean_sym = symbol.replace(".NS", "").replace(".BSE", "")
+            if not any(x in symbol for x in ["-USD", "-INR", "^", "="]):
+                nse_data = get_nse_quote(clean_sym)
+                ltp = nse_data.get("lastPrice", 0.0)
+                if ltp and float(ltp) > 0:
+                    p = round(float(ltp), 2)
+                    _price_cache_put(symbol, p)
+                    return p
+        except Exception:
+            pass
+
+        # 1b. Yahoo Finance direct (live price via v8 chart, 1m bar)
+        try:
+            from app.services.yahoo_finance import yahoo_service
+            yf_sym = symbol if any(x in symbol for x in [".NS", ".BSE", "-USD", "^", "="]) else symbol + ".NS"
+            p = yahoo_service.get_quote(yf_sym)
+            if p > 0:
+                _price_cache_put(symbol, p)
+                return p
+        except Exception:
+            pass
+
+        # 1c. yfinance library (last resort — circuit-breaker protected)
         if not _yf_circuit_open():
             try:
                 def _yf_price():

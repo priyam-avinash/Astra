@@ -5,7 +5,7 @@ import {
   Menu, X, Bell, User, LogOut, Activity, LayoutDashboard,
   DollarSign, Bitcoin, Telescope, TrendingUp, TrendingDown,
   Package, ChevronRight, Search, RefreshCw, AlertCircle,
-  ArrowUpRight, ArrowDownRight, Minus
+  ArrowUpRight, ArrowDownRight, Minus, Timer
 } from 'lucide-react';
 import AIPredictionsView  from './AIPredictionsView';
 import AutoModeView       from './AutoModeView';
@@ -17,6 +17,7 @@ import ManualTradeView    from './ManualTradeView';
 import SettingsView       from './SettingsView';
 import ScannerView        from './ScannerView';
 import CryptoView         from './CryptoView';
+import IntradayView       from './IntradayView';
 
 // ── Helpers ────────────────────────────────────────────────────────
 function isMarketOpen() {
@@ -49,6 +50,7 @@ const NAV_GROUPS = [
       { id: 'Deep Analysis',name: 'Deep Analysis', icon: <BarChart3      size={16} /> },
       { id: 'Crypto',       name: 'Crypto',        icon: <Bitcoin        size={16} /> },
       { id: 'Scanner',      name: 'Universe Scan', icon: <Telescope      size={16} /> },
+      { id: 'Intraday',     name: 'Intraday',      icon: <Timer          size={16} /> },
       { id: 'Commodities',  name: 'Commodities',   icon: <Package        size={16} /> },
     ]
   },
@@ -200,6 +202,8 @@ export default function App() {
         return <CryptoView onNavigateToAnalysis={(sym, mkt) => goToAnalysis(sym, mkt)} />;
       case 'Scanner':
         return <ScannerView />;
+      case 'Intraday':
+        return <IntradayView />;
       case 'Commodities':
         return <ComingSoon title="Commodities" subtitle="Gold · Silver · Crude · Natural Gas · Copper" icon={<Package size={32} />} />;
       case 'AI Predictions':

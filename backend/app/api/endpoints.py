@@ -836,38 +836,13 @@ def get_available_sectors(current_user: User = Depends(get_current_user)):
             "universe_size": len(universe_scanner.symbols)}
 
 
-@router.get("/api/intraday/{symbol}")
-def analyze_intraday(
-    symbol: str,
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Intraday signal for a single NSE stock.
-    Uses 15-minute OHLCV data.
-    Strategies: Opening Range Breakout (ORB) + VWAP Mean Reversion.
-
-    Returns: signal, strategy, entry_price, sl, tp, confidence, time_remaining_min
-    Only generates signals during market hours (09:15 – 14:45 IST).
-    """
-    from app.services.intraday_engine import intraday_engine
-    sym = symbol.upper()
-    if not sym.endswith(".NS"):
-        sym = sym + ".NS"
-    try:
-        result = intraday_engine.analyze_intraday(sym)
-        return result
-    except Exception as e:
-        logger.error(f"Intraday analysis failed for {sym}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.get("/api/intraday/scan/top")
 def intraday_universe_scan(
     top_k: int = 10,
     current_user: User = Depends(get_current_user),
 ):
     """
-    Scans NIFTY 50 for intraday signals.
+    Scans NIFTY 50 for intraday signals (ORB + VWAP_MR + Momentum).
     Returns top_k signals ranked by confidence.
     Best called between 09:45 – 14:30 IST.
     """
@@ -875,7 +850,8 @@ def intraday_universe_scan(
     from app.services.universe_scanner import _NIFTY_50
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    symbols = [s + ".NS" for s in _NIFTY_50]
+    # Pass bare symbols — engine strips .NS internally
+    symbols = list(_NIFTY_50)
     results = []
 
     def _scan_one(sym):
@@ -901,6 +877,55 @@ def intraday_universe_scan(
         "scanned": len(symbols),
         "active_signals": len(results),
     }
+
+
+@router.get("/api/intraday/backtest/{symbol}")
+def intraday_backtest(
+    symbol: str,
+    days: int = 30,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Walk-forward backtest of ORB, VWAP_MR, and Momentum strategies
+    on historical 15-minute data for a single NSE stock.
+
+    Query params:
+      days (int, default=30) — how many calendar days of history to test
+
+    Returns per-strategy stats: trades, wins, win_rate, P&L, Sharpe, max_drawdown.
+    """
+    from app.services.intraday_backtest import run_intraday_backtest
+    sym = symbol.upper().replace(".NS", "").replace(".BSE", "")
+    try:
+        result = run_intraday_backtest(sym, days=days)
+        return _sanitize(result)
+    except Exception as e:
+        logger.error(f"Intraday backtest failed for {sym}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/intraday/{symbol}")
+def analyze_intraday(
+    symbol: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Intraday signal for a single NSE stock.
+    Uses 15-minute OHLCV data (Dhan primary, AV fallback).
+    Strategies: ORB + VWAP Mean Reversion + Momentum.
+
+    Returns: signal, strategy, entry_price, sl, tp, confidence,
+             market_session, time_remaining_min, auto_squareoff_active.
+    """
+    from app.services.intraday_engine import intraday_engine
+    # Strip suffix — engine handles bare symbols directly
+    sym = symbol.upper().replace(".NS", "").replace(".BSE", "")
+    try:
+        result = intraday_engine.analyze_intraday(sym)
+        return result
+    except Exception as e:
+        logger.error(f"Intraday analysis failed for {sym}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/commodities/list")

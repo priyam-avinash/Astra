@@ -895,3 +895,9 @@ h1, h2, h3, h4, h5, h6 { color: var(--text-primary); font-weight: 600; }
 
 /* ── Divider ─────────────────────────────────────────────────── */
 .divider { height: 1px; background: var(--border-subtle); margin: 16px 0; }
+
+/* ── Spin animation (used by refresh icons) ──────────────────── */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
