@@ -25,8 +25,10 @@ logger = logging.getLogger(__name__)
 MARKET_OPEN      = "09:15"
 MARKET_CLOSE     = "15:30"
 ORB_WINDOW_MIN   = 30          # First 30 minutes define the Opening Range (09:15–09:45)
-INTRADAY_SL_PCT  = 0.003       # 0.3% stop-loss
-INTRADAY_TP_PCT  = 0.006       # 0.6% take-profit
+INTRADAY_SL_PCT  = 0.003       # 0.3% floor stop-loss (ATR-based when possible)
+INTRADAY_TP_PCT  = 0.009       # 0.9% floor take-profit → 1:3 risk/reward floor
+ATR_SL_MULT      = 1.0         # ATR multiplier for SL (1× ATR)
+ATR_TP_MULT      = 3.0         # ATR multiplier for TP (3× ATR → 1:3 R:R)
 NO_TRADE_AFTER   = "14:45"     # No new entries after this time
 SQUARE_OFF_TIME  = "15:15"     # Auto square-off: close all positions by 15:15 IST
 
@@ -444,6 +446,40 @@ def _compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int
     return macd_line, signal_line, histogram
 
 
+def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Average True Range (Wilder's smoothing).
+    True Range = max(H-L, |H-Cprev|, |L-Cprev|)
+    """
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        (df["High"] - prev_close).abs(),
+        (df["Low"]  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+
+def _atr_sl_tp(df: pd.DataFrame, close: float, signal: str) -> tuple:
+    """
+    Compute ATR-based SL and TP for a given signal direction.
+    Returns (sl, tp) using ATR_SL_MULT and ATR_TP_MULT.
+    Falls back to fixed INTRADAY_SL_PCT / INTRADAY_TP_PCT if ATR unavailable.
+    """
+    try:
+        atr_val = float(_compute_atr(df).dropna().iloc[-1])
+        sl_pct  = max(INTRADAY_SL_PCT, atr_val / close)
+        tp_pct  = sl_pct * ATR_TP_MULT
+    except Exception:
+        sl_pct = INTRADAY_SL_PCT
+        tp_pct = INTRADAY_TP_PCT
+
+    if signal == "BUY":
+        return round(close * (1 - sl_pct), 2), round(close * (1 + tp_pct), 2)
+    else:  # SELL
+        return round(close * (1 + sl_pct), 2), round(close * (1 - tp_pct), 2)
+
+
 def _compute_orb(df: pd.DataFrame, date) -> tuple:
     """
     Opening Range (high/low) from first ORB_WINDOW_MIN minutes of the given date.
@@ -487,13 +523,13 @@ def orb_signal(df: pd.DataFrame, date) -> dict:
     vol_ok = float(last["Volume"]) > 1.5 * avg_vol if avg_vol > 0 else False
 
     if close > orb_high and vol_ok:
+        sl, tp = _atr_sl_tp(day_df, close, "BUY")
         return {"signal": "BUY",  "entry_price": round(close, 2),
-                "sl": round(close * (1 - INTRADAY_SL_PCT), 2),
-                "tp": round(close * (1 + INTRADAY_TP_PCT), 2), "strategy": "ORB"}
+                "sl": sl, "tp": tp, "strategy": "ORB"}
     elif close < orb_low and vol_ok:
+        sl, tp = _atr_sl_tp(day_df, close, "SELL")
         return {"signal": "SELL", "entry_price": round(close, 2),
-                "sl": round(close * (1 + INTRADAY_SL_PCT), 2),
-                "tp": round(close * (1 - INTRADAY_TP_PCT), 2), "strategy": "ORB"}
+                "sl": sl, "tp": tp, "strategy": "ORB"}
 
     return {**_hold, "entry_price": close}
 
@@ -541,16 +577,16 @@ def ema_cross_signal(df: pd.DataFrame) -> dict:
     if bull_cross and rsi > 50 and close > vwap:
         if not _trend_aligned(df, "BUY"):
             return {**_hold, "entry_price": close}
+        sl, tp = _atr_sl_tp(df, close, "BUY")
         return {"signal": "BUY",  "entry_price": round(close, 2),
-                "sl": round(close * (1 - INTRADAY_SL_PCT), 2),
-                "tp": round(close * (1 + INTRADAY_TP_PCT), 2), "strategy": "EMA_Cross"}
+                "sl": sl, "tp": tp, "strategy": "EMA_Cross"}
 
     if bear_cross and rsi < 50 and close < vwap:
         if not _trend_aligned(df, "SELL"):
             return {**_hold, "entry_price": close}
+        sl, tp = _atr_sl_tp(df, close, "SELL")
         return {"signal": "SELL", "entry_price": round(close, 2),
-                "sl": round(close * (1 + INTRADAY_SL_PCT), 2),
-                "tp": round(close * (1 - INTRADAY_TP_PCT), 2), "strategy": "EMA_Cross"}
+                "sl": sl, "tp": tp, "strategy": "EMA_Cross"}
 
     return {**_hold, "entry_price": close}
 
@@ -590,15 +626,15 @@ def momentum_signal(df: pd.DataFrame) -> dict:
     if rsi > 55 and hist > 0 and bull_cross:
         if not _trend_aligned(df, "BUY"):
             return {**_hold, "entry_price": close}
+        sl, tp = _atr_sl_tp(df, close, "BUY")
         return {"signal": "BUY",  "entry_price": round(close, 2),
-                "sl": round(close * (1 - INTRADAY_SL_PCT), 2),
-                "tp": round(close * (1 + INTRADAY_TP_PCT), 2), "strategy": "Momentum"}
+                "sl": sl, "tp": tp, "strategy": "Momentum"}
     elif rsi < 45 and hist < 0 and bear_cross:
         if not _trend_aligned(df, "SELL"):
             return {**_hold, "entry_price": close}
+        sl, tp = _atr_sl_tp(df, close, "SELL")
         return {"signal": "SELL", "entry_price": round(close, 2),
-                "sl": round(close * (1 + INTRADAY_SL_PCT), 2),
-                "tp": round(close * (1 - INTRADAY_TP_PCT), 2), "strategy": "Momentum"}
+                "sl": sl, "tp": tp, "strategy": "Momentum"}
 
     return {**_hold, "entry_price": close}
 

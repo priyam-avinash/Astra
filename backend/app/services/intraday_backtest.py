@@ -22,6 +22,8 @@ from app.services.intraday_engine import (
     _compute_vwap,
     _compute_rsi_series,
     _compute_macd,
+    _compute_atr,
+    _atr_sl_tp,
     _compute_orb,
     _trend_aligned,
     INTRADAY_SL_PCT,
@@ -36,7 +38,8 @@ logger = logging.getLogger(__name__)
 _IST = pytz.timezone("Asia/Kolkata")
 
 # Assume a fixed notional trade size for P&L calculation
-TRADE_NOTIONAL = 100_000  # ₹1 lakh per trade
+TRADE_NOTIONAL  = 100_000  # ₹1 lakh per trade
+SLIPPAGE_PCT    = 0.001    # 0.1% per side (realistic NSE intraday slippage)
 
 
 # ── Per-trade simulation ──────────────────────────────────────────────────────
@@ -44,14 +47,25 @@ TRADE_NOTIONAL = 100_000  # ₹1 lakh per trade
 def _simulate_trade(signal: str, entry_price: float, sl: float, tp: float,
                     future_bars: pd.DataFrame) -> dict:
     """
-    Given a signal and the bars AFTER the entry bar, simulate:
-    - Hit TP  → win (return TP pct gain)
-    - Hit SL  → loss
-    - Hit 15:15 square-off → scratch (close at that bar's close)
+    Walk-forward bar-by-bar simulation with:
+    - Slippage (0.1% per side) applied at entry
+    - Trailing SL: breakeven after 50% of move to TP, then 50%-of-TP trail after 75%
+    - SL checked before TP on each bar (conservative, worst-case intrabar)
+    - Auto square-off at 15:15 IST
 
     Returns dict with: outcome, exit_price, pnl_pct, pnl_rs, bars_held
     """
     sq_off = dtime(*[int(x) for x in SQUARE_OFF_TIME.split(":")])
+
+    # Apply slippage at entry
+    if signal == "BUY":
+        fill_price = entry_price * (1 + SLIPPAGE_PCT)
+    else:
+        fill_price = entry_price * (1 - SLIPPAGE_PCT)
+
+    # Dynamic trailing SL (starts at original SL, tracks profit)
+    trailing_sl = sl
+    move_to_tp  = abs(tp - fill_price)   # total move from fill to TP
 
     for i, (ts, bar) in enumerate(future_bars.iterrows()):
         bar_time = ts.time() if hasattr(ts, "time") else ts.to_pydatetime().time()
@@ -60,39 +74,56 @@ def _simulate_trade(signal: str, entry_price: float, sl: float, tp: float,
         low   = float(bar["Low"])
         close = float(bar["Close"])
 
+        # Update trailing SL based on how far price has moved toward TP
+        if move_to_tp > 0:
+            if signal == "BUY":
+                progress = (high - fill_price) / move_to_tp
+                if progress >= 0.75:
+                    new_trail = fill_price + move_to_tp * 0.50   # trail to 50% of TP
+                    trailing_sl = max(trailing_sl, new_trail)
+                elif progress >= 0.50:
+                    trailing_sl = max(trailing_sl, fill_price)    # breakeven
+            else:  # SELL
+                progress = (fill_price - low) / move_to_tp
+                if progress >= 0.75:
+                    new_trail = fill_price - move_to_tp * 0.50
+                    trailing_sl = min(trailing_sl, new_trail)
+                elif progress >= 0.50:
+                    trailing_sl = min(trailing_sl, fill_price)    # breakeven
+
         if signal == "BUY":
-            # Check SL first (intrabar worst-case)
-            if low <= sl:
-                exit_price = sl
-                pnl_pct    = (exit_price - entry_price) / entry_price
+            if low <= trailing_sl:
+                exit_price = trailing_sl
+                pnl_pct    = (exit_price - fill_price) / fill_price
                 return _trade_result("SL", exit_price, pnl_pct, i + 1)
             if high >= tp:
                 exit_price = tp
-                pnl_pct    = (exit_price - entry_price) / entry_price
+                pnl_pct    = (exit_price - fill_price) / fill_price
                 return _trade_result("TP", exit_price, pnl_pct, i + 1)
         else:  # SELL
-            if high >= sl:
-                exit_price = sl
-                pnl_pct    = (entry_price - exit_price) / entry_price
+            if high >= trailing_sl:
+                exit_price = trailing_sl
+                pnl_pct    = (fill_price - exit_price) / fill_price
                 return _trade_result("SL", exit_price, pnl_pct, i + 1)
             if low <= tp:
                 exit_price = tp
-                pnl_pct    = (entry_price - exit_price) / entry_price
+                pnl_pct    = (fill_price - exit_price) / fill_price
                 return _trade_result("TP", exit_price, pnl_pct, i + 1)
 
         # Auto square-off at 15:15
         if bar_time >= sq_off:
-            exit_price = close
+            exit_price = close * (1 - SLIPPAGE_PCT) if signal == "BUY" else close * (1 + SLIPPAGE_PCT)
             if signal == "BUY":
-                pnl_pct = (exit_price - entry_price) / entry_price
+                pnl_pct = (exit_price - fill_price) / fill_price
             else:
-                pnl_pct = (entry_price - exit_price) / entry_price
+                pnl_pct = (fill_price - exit_price) / fill_price
             return _trade_result("SQ_OFF", exit_price, pnl_pct, i + 1)
 
     # End of data without resolution → square-off at last bar close
     if not future_bars.empty:
-        exit_price = float(future_bars.iloc[-1]["Close"])
-        pnl_pct = (exit_price - entry_price) / entry_price if signal == "BUY" else (entry_price - exit_price) / entry_price
+        raw_exit   = float(future_bars.iloc[-1]["Close"])
+        exit_price = raw_exit * (1 - SLIPPAGE_PCT) if signal == "BUY" else raw_exit * (1 + SLIPPAGE_PCT)
+        pnl_pct    = (exit_price - fill_price) / fill_price if signal == "BUY" else (fill_price - exit_price) / fill_price
         return _trade_result("SQ_OFF", exit_price, pnl_pct, len(future_bars))
 
     return _trade_result("NO_EXIT", entry_price, 0.0, 0)
@@ -128,21 +159,16 @@ def _get_orb_signal_for_day(day_df: pd.DataFrame, date) -> Optional[dict]:
 
     for ts, bar in post_orb.iterrows():
         close  = float(bar["Close"])
-        # Require at least 0.8× average volume (relaxed from 1.5×: mid-session
-        # breakouts are valid even without surge volume; 1.5× was too strict)
-        vol_ok = float(bar["Volume"]) >= 0.8 * avg_vol if avg_vol > 0 else True
+        # Require at least 1.5× average volume — surge volume confirms genuine breakout
+        vol_ok = float(bar["Volume"]) >= 1.5 * avg_vol if avg_vol > 0 else True
         if close > orb_high and vol_ok:
-            return {"signal": "BUY",
-                    "entry_price": close,
-                    "sl": round(close * (1 - INTRADAY_SL_PCT), 2),
-                    "tp": round(close * (1 + INTRADAY_TP_PCT), 2),
-                    "entry": close, "ts": ts}
+            sl, tp = _atr_sl_tp(day_df.loc[:ts], close, "BUY")
+            return {"signal": "BUY",  "entry_price": close,
+                    "sl": sl, "tp": tp, "entry": close, "ts": ts}
         elif close < orb_low and vol_ok:
-            return {"signal": "SELL",
-                    "entry_price": close,
-                    "sl": round(close * (1 + INTRADAY_SL_PCT), 2),
-                    "tp": round(close * (1 - INTRADAY_TP_PCT), 2),
-                    "entry": close, "ts": ts}
+            sl, tp = _atr_sl_tp(day_df.loc[:ts], close, "SELL")
+            return {"signal": "SELL", "entry_price": close,
+                    "sl": sl, "tp": tp, "entry": close, "ts": ts}
     return None
 
 
@@ -184,16 +210,14 @@ def _get_ema_cross_signal_for_day(day_df: pd.DataFrame, full_df: pd.DataFrame) -
         if bull_cross and rsi > 50 and close > vwap:
             if not _trend_aligned(full_df, "BUY"):
                 continue
-            return {"signal": "BUY",  "entry_price": close,
-                    "sl": round(close * (1 - INTRADAY_SL_PCT), 2),
-                    "tp": round(close * (1 + INTRADAY_TP_PCT), 2), "ts": ts}
+            sl, tp = _atr_sl_tp(df.iloc[:i+1], close, "BUY")
+            return {"signal": "BUY",  "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
 
         if bear_cross and rsi < 50 and close < vwap:
             if not _trend_aligned(full_df, "SELL"):
                 continue
-            return {"signal": "SELL", "entry_price": close,
-                    "sl": round(close * (1 + INTRADAY_SL_PCT), 2),
-                    "tp": round(close * (1 - INTRADAY_TP_PCT), 2), "ts": ts}
+            sl, tp = _atr_sl_tp(df.iloc[:i+1], close, "SELL")
+            return {"signal": "SELL", "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
     return None
 
 
@@ -226,14 +250,14 @@ def _get_momentum_signal_for_day(day_df: pd.DataFrame, full_df: pd.DataFrame) ->
                 if not _trend_aligned(full_df, "BUY"):
                     prev_row = row
                     continue
-                return {"signal": "BUY", "entry_price": close, "sl": round(close * (1 - INTRADAY_SL_PCT), 2),
-                        "tp": round(close * (1 + INTRADAY_TP_PCT), 2), "ts": ts}
+                sl, tp = _atr_sl_tp(df.loc[:ts], close, "BUY")
+                return {"signal": "BUY",  "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
             elif rsi < 45 and hist < 0 and bear_cross:
                 if not _trend_aligned(full_df, "SELL"):
                     prev_row = row
                     continue
-                return {"signal": "SELL", "entry_price": close, "sl": round(close * (1 + INTRADAY_SL_PCT), 2),
-                        "tp": round(close * (1 - INTRADAY_TP_PCT), 2), "ts": ts}
+                sl, tp = _atr_sl_tp(df.loc[:ts], close, "SELL")
+                return {"signal": "SELL", "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
         prev_row = row
     return None
 
@@ -244,24 +268,36 @@ def _build_stats(trades: list) -> dict:
     if not trades:
         return {"trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0,
                 "total_pnl_rs": 0.0, "avg_pnl_rs": 0.0,
-                "max_drawdown_pct": 0.0, "sharpe": None, "profit_factor": None}
+                "max_drawdown_rs": 0.0, "sharpe": None, "profit_factor": None}
 
-    wins    = [t for t in trades if t["pnl_rs"] > 0]
-    losses  = [t for t in trades if t["pnl_rs"] <= 0]
-    pnls    = [t["pnl_rs"] for t in trades]
+    wins   = [t for t in trades if t["pnl_rs"] > 0]
+    losses = [t for t in trades if t["pnl_rs"] <= 0]
+    pnls   = [t["pnl_rs"] for t in trades]
+
+    # Drawdown on cumulative trade P&L (in ₹)
     cum_pnl = np.cumsum(pnls)
     peak    = np.maximum.accumulate(cum_pnl)
-    dd      = (cum_pnl - peak)
+    dd      = cum_pnl - peak
     max_dd  = float(dd.min()) if len(dd) > 0 else 0.0
 
-    # Sharpe (annualised, daily returns proxy)
-    pnl_arr = np.array(pnls)
-    sharpe  = None
-    if pnl_arr.std() > 0:
-        sharpe = round(float(pnl_arr.mean() / pnl_arr.std() * np.sqrt(252)), 2)
+    # Correct Sharpe: aggregate to DAILY P&L first, then annualise
+    sharpe = None
+    try:
+        daily_map: dict = {}
+        for t in trades:
+            d = t.get("date", "unknown")
+            daily_map[d] = daily_map.get(d, 0.0) + t["pnl_rs"]
+        daily_pnls = list(daily_map.values())
+        if len(daily_pnls) >= 2:
+            arr  = np.array(daily_pnls, dtype=float)
+            std  = arr.std()
+            if std > 0:
+                sharpe = round(float(arr.mean() / std * np.sqrt(252)), 2)
+    except Exception:
+        pass
 
-    gross_profit = sum(p for p in pnls if p > 0)
-    gross_loss   = abs(sum(p for p in pnls if p < 0))
+    gross_profit  = sum(p for p in pnls if p > 0)
+    gross_loss    = abs(sum(p for p in pnls if p < 0))
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else None
 
     return {
@@ -358,13 +394,26 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
         _simulate_if_signal(ema_sig,  "EMA_Cross", ema_trades)
         _simulate_if_signal(mom_sig,  "Momentum", mom_trades)
 
-        # Combined: prefer consensus, else first available
+        # Combined: prefer consensus direction, then pick highest-quality signal
         signals_today = [s for s in [orb_sig, ema_sig, mom_sig] if s is not None]
         if signals_today:
             buys  = [s for s in signals_today if s["signal"] == "BUY"]
             sells = [s for s in signals_today if s["signal"] == "SELL"]
             dominant = buys if len(buys) >= len(sells) else sells
-            chosen = dominant[0]  # earliest-entry among dominant
+
+            def _signal_score(sig: dict) -> float:
+                """Higher R:R and later timestamp (more confirmation) = better signal."""
+                entry = sig.get("entry_price", 1.0)
+                sl    = sig.get("sl", entry)
+                tp    = sig.get("tp", entry)
+                risk  = abs(entry - sl)
+                reward = abs(tp - entry)
+                rr    = reward / risk if risk > 0 else 0.0
+                # Prefer higher R:R; tiebreak: later entry (more bars of confirmation)
+                ts_score = sig.get("ts", pd.Timestamp.min)
+                return (rr, ts_score)
+
+            chosen = max(dominant, key=_signal_score)
             future = day_df[day_df.index > chosen["ts"]]
             if not future.empty:
                 res = _simulate_trade(chosen["signal"], chosen["entry_price"],
@@ -402,7 +451,9 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
         "equity_curve": equity_curve,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "note": (
-            "Backtest uses ₹1L notional per trade, 0.3% SL, 0.6% TP, "
-            "auto square-off at 15:15 IST. No brokerage/slippage costs included."
+            "Backtest uses ₹1L notional per trade. ATR-based SL/TP (1× ATR SL, 3× ATR TP, "
+            "floor 0.3%/0.9%). Trailing SL: breakeven at 50% to TP, trail at 75%. "
+            "Slippage: 0.1% per side. ORB volume filter: 1.5× avg. "
+            "Sharpe: daily-aggregated returns. Auto square-off 15:15 IST."
         ),
     }
