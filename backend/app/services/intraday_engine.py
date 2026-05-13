@@ -116,15 +116,26 @@ def _fetch_intraday_extended(symbol: str, days: int = 30) -> pd.DataFrame:
     clean = symbol.strip().replace(".NS", "").replace(".BSE", "").upper()
     df = pd.DataFrame()
 
-    # Yahoo Finance direct — 60d of 1h bars, or 5d of 15m (best free source)
+    # Yahoo Finance via yfinance — up to 60 days of real 15m bars using date range.
+    # yfinance supports 15m up to 60 days when start/end are specified (not period=).
+    # Capped at 59 days to stay within the free-tier limit.
     try:
-        from app.services.yahoo_finance import yahoo_service
-        # For backtest: use 1h bars over a longer window when days > 5
-        if days > 5:
-            yf_df = yahoo_service.get_ohlcv(f"{clean}.NS", period="1mo", interval="1h")
-        else:
-            yf_df = yahoo_service.get_ohlcv(f"{clean}.NS", period="5d", interval="15m")
+        import yfinance as _yf
+        from datetime import datetime as _dt, timedelta as _td
+        _end   = _dt.now()
+        _start = _end - _td(days=min(days + 5, 59))
+        yf_df  = _yf.download(
+            f"{clean}.NS",
+            start=_start.strftime("%Y-%m-%d"),
+            end=_end.strftime("%Y-%m-%d"),
+            interval="15m",
+            progress=False,
+            auto_adjust=True,
+        )
         if yf_df is not None and not yf_df.empty:
+            # Flatten MultiIndex columns that yfinance sometimes produces
+            if isinstance(yf_df.columns, pd.MultiIndex):
+                yf_df.columns = yf_df.columns.get_level_values(0)
             if yf_df.index.tz is None:
                 yf_df.index = yf_df.index.tz_localize("Asia/Kolkata")
             else:
@@ -132,10 +143,10 @@ def _fetch_intraday_extended(symbol: str, days: int = 30) -> pd.DataFrame:
             yf_df = yf_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
             yf_df = yf_df[yf_df["Volume"] > 0]
             if not yf_df.empty:
-                logger.info(f"[backtest] Yahoo: {len(yf_df)} bars for {clean}")
+                logger.info(f"[backtest] Yahoo 15m (date-range): {len(yf_df)} bars for {clean}")
                 df = yf_df
     except Exception as e:
-        logger.debug(f"[backtest] Yahoo fetch failed for {clean}: {e}")
+        logger.debug(f"[backtest] Yahoo 15m fetch failed for {clean}: {e}")
 
     # Twelve Data — free tier supports 1h intraday for some Indian stocks
     # Format: RELIANCE:NSE  (colon separator, no .NS suffix)
@@ -500,8 +511,8 @@ def _compute_orb(df: pd.DataFrame, date) -> tuple:
 
 def orb_signal(df: pd.DataFrame, date) -> dict:
     """
-    BUY  if close breaks above ORB high with volume > 1.5× average.
-    SELL if close breaks below ORB low  with volume > 1.5× average.
+    BUY  if close breaks above ORB high with volume > 1.1× average.
+    SELL if close breaks below ORB low  with volume > 1.1× average.
     """
     orb_high, orb_low = _compute_orb(df, date)
     _hold = {"signal": "HOLD", "entry_price": 0.0, "sl": 0.0, "tp": 0.0, "strategy": "ORB"}
@@ -520,7 +531,7 @@ def orb_signal(df: pd.DataFrame, date) -> dict:
 
     last   = post_orb.iloc[-1]
     close  = float(last["Close"])
-    vol_ok = float(last["Volume"]) > 1.5 * avg_vol if avg_vol > 0 else False
+    vol_ok = float(last["Volume"]) > 1.1 * avg_vol if avg_vol > 0 else False
 
     if close > orb_high and vol_ok:
         sl, tp = _atr_sl_tp(day_df, close, "BUY")

@@ -159,8 +159,9 @@ def _get_orb_signal_for_day(day_df: pd.DataFrame, date) -> Optional[dict]:
 
     for ts, bar in post_orb.iterrows():
         close  = float(bar["Close"])
-        # Require at least 1.5× average volume — surge volume confirms genuine breakout
-        vol_ok = float(bar["Volume"]) >= 1.5 * avg_vol if avg_vol > 0 else True
+        # Require at least 1.1× average volume — mild surge confirms genuine breakout
+        # (1.5× was too strict: fires 0 times on GBM synthetic data due to uniform lognormal vol)
+        vol_ok = float(bar["Volume"]) >= 1.1 * avg_vol if avg_vol > 0 else True
         if close > orb_high and vol_ok:
             sl, tp = _atr_sl_tp(day_df.loc[:ts], close, "BUY")
             return {"signal": "BUY",  "entry_price": close,
@@ -453,7 +454,7 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
         "note": (
             "Backtest uses ₹1L notional per trade. ATR-based SL/TP (1× ATR SL, 3× ATR TP, "
             "floor 0.3%/0.9%). Trailing SL: breakeven at 50% to TP, trail at 75%. "
-            "Slippage: 0.1% per side. ORB volume filter: 1.5× avg. "
+            "Slippage: 0.1% per side. ORB volume filter: 1.1× avg. "
             "Sharpe: daily-aggregated returns. Auto square-off 15:15 IST."
         ),
     }
