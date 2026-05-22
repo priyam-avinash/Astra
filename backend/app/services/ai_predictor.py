@@ -570,21 +570,46 @@ class AIPredictionEngine:
 
     def _check_buy_confirmations(self, row, patterns: dict, macro_bull: bool) -> tuple:
         """
-        ASTRA 1.0 — 4/6 multi-confirmation BUY system.
+        ASTRA 1.0 — 4/7 multi-confirmation BUY system.
         Returns (passed, score, confirmation_details)
+
+        Changes from v1.0:
+          - RSI threshold relaxed 35→50: uptrend stocks pull back to 40-50, not below 35
+          - SMA200 and ADX are now separate independent checks (7 total, need 4)
+          - Candlestick check: raw geometry (close>open + lower shadow) replaces pattern engine
+            so it works identically in live and backtest contexts
         """
+        candle_range  = float(row.get("High", 0)) - float(row.get("Low", 0))
+        lower_shadow  = float(row.get("Open", 0)) - float(row.get("Low", 0))  # BUY candle shadow
+        bullish_candle = (
+            float(row.get("Close", 0)) > float(row.get("Open", 0))  # positive body
+            and candle_range > 0
+            and (lower_shadow / candle_range) > 0.3                  # lower shadow ≥ 30% of range
+        )
+        # Also accept pattern engine if it fires (live mode)
+        if patterns.get("any_bullish", False):
+            bullish_candle = True
+
         checks = {
-            "RSI oversold & turning up": (row["RSI"] < 35) and (row["RSI_Slope"] > 0),
-            "Trend & strength (SMA200 + ADX)": (row["Dist_SMA200"] > 0) and (row["ADX"] > 20),
-            "MACD bullish crossover": row["MACD"] > row["MACD_Signal"],
-            "Volume spike (>1.5x avg)": row["Volume_Ratio"] > 1.5,
-            "Bullish candlestick pattern": patterns.get("any_bullish", False),
-            "Near lower Bollinger Band": row["BB_PctB"] < 0.25,
+            # 1. RSI dip-and-recover: pullback into 40-50 zone, now turning up
+            "RSI pullback & recovering":     float(row.get("RSI", 100)) < 50 and float(row.get("RSI_Slope", -1)) > 0,
+            # 2. Price remains above long-term trend (uptrend structure)
+            "Price above SMA200":            float(row.get("Dist_SMA200", -1)) > 0,
+            # 3. Trend strength independent of price level
+            "Strong trend (ADX > 25)":       float(row.get("ADX", 0)) > 25,
+            # 4. MACD momentum turning bullish
+            "MACD bullish crossover":        float(row.get("MACD", 0)) > float(row.get("MACD_Signal", 0)),
+            # 5. Volume confirms the move
+            "Volume spike (>1.5x avg)":      float(row.get("Volume_Ratio", 0)) > 1.5,
+            # 6. Geometry: bullish body + support shadow (no pattern engine dependency)
+            "Bullish candle (body + lower shadow)": bullish_candle,
+            # 7. Near lower Bollinger Band (mean-reversion setup)
+            "Near lower Bollinger Band":     float(row.get("BB_PctB", 1.0)) < 0.35,
         }
         passed_count = sum(checks.values())
-        score = (passed_count / 6) * 100
+        score = (passed_count / 7) * 100
 
-        # Macro filter: In a bear market, require 5/6 for BUY (stricter)
+        # Macro filter: bear market requires 5/7 (stricter)
         threshold = 4 if macro_bull else 5
 
         return (passed_count >= threshold), round(score, 1), checks
