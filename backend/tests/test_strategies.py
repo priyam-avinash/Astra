@@ -358,3 +358,68 @@ def test_astra1_bullish_candle_check_fires_on_positive_body():
     patterns = {"any_bullish": False}
     _, _, checks = ai_engine._check_buy_confirmations(row, patterns, macro_bull=True)
     assert checks["Bullish candle (body + lower shadow)"] is True
+
+
+def test_astra1_bear_market_requires_5_of_7():
+    """In bear market (macro_bull=False), 4/7 should NOT pass (need 5)."""
+    from app.services.ai_predictor import ai_engine
+    import pandas as pd
+
+    # Construct row that passes exactly 4 checks:
+    # RSI pullback+slope ✓, Price>SMA200 ✓, MACD bullish ✓, Volume spike ✓, rest fail
+    row = pd.Series({
+        "RSI": 45.0, "RSI_Slope": 1.0,      # check 1 ✓
+        "Dist_SMA200": 5.0,                  # check 2 ✓
+        "ADX": 15.0,                         # check 3 ✗ (< 25)
+        "MACD": 1.0, "MACD_Signal": 0.5,    # check 4 ✓
+        "Volume_Ratio": 2.0,                 # check 5 ✓
+        "BB_PctB": 0.8,                      # check 7 ✗ (> 0.35)
+        "Close": 97.0, "Open": 100.0,        # check 6 ✗ (bearish candle)
+        "High": 101.0, "Low": 96.0,
+    })
+    patterns = {"any_bullish": False}
+
+    passed_bull, _, _ = ai_engine._check_buy_confirmations(row, patterns, macro_bull=True)
+    passed_bear, _, _ = ai_engine._check_buy_confirmations(row, patterns, macro_bull=False)
+
+    assert passed_bull is True,  "4/7 should pass in bull market"
+    assert passed_bear is False, "4/7 should NOT pass in bear market (need 5)"
+
+
+def test_astra1_any_bullish_pattern_overrides_bearish_candle():
+    """any_bullish=True from pattern engine should override a bearish candle geometry."""
+    from app.services.ai_predictor import ai_engine
+    import pandas as pd
+
+    # Bearish candle (Close < Open) — geometry check would fail
+    row = pd.Series({
+        "RSI": 45.0, "RSI_Slope": 1.0, "Dist_SMA200": 5.0, "ADX": 28.0,
+        "MACD": 1.0, "MACD_Signal": 0.5, "Volume_Ratio": 2.0,
+        "BB_PctB": 0.2,
+        "Close": 97.0, "Open": 100.0,   # bearish body
+        "High": 101.0, "Low": 96.0,
+    })
+    patterns_no_engine  = {"any_bullish": False}
+    patterns_with_engine = {"any_bullish": True}
+
+    _, _, checks_no  = ai_engine._check_buy_confirmations(row, patterns_no_engine,  macro_bull=True)
+    _, _, checks_yes = ai_engine._check_buy_confirmations(row, patterns_with_engine, macro_bull=True)
+
+    assert checks_no["Bullish candle (body + lower shadow)"]  is False, "Bearish candle should fail geometry"
+    assert checks_yes["Bullish candle (body + lower shadow)"] is True,  "Pattern engine override should set True"
+
+
+def test_astra1_rsi_exactly_50_does_not_pass():
+    """RSI exactly 50.0 should NOT pass (check is strictly < 50)."""
+    from app.services.ai_predictor import ai_engine
+    import pandas as pd
+
+    row = pd.Series({
+        "RSI": 50.0, "RSI_Slope": 1.0, "Dist_SMA200": 5.0, "ADX": 28.0,
+        "MACD": 1.0, "MACD_Signal": 0.5, "Volume_Ratio": 2.0,
+        "BB_PctB": 0.2, "Close": 100.0, "Open": 98.0,
+        "High": 101.0, "Low": 97.0,
+    })
+    patterns = {"any_bullish": False}
+    _, _, checks = ai_engine._check_buy_confirmations(row, patterns, macro_bull=True)
+    assert checks["RSI pullback & recovering"] is False, "RSI=50 is not < 50"

@@ -578,6 +578,7 @@ class AIPredictionEngine:
           - SMA200 and ADX are now separate independent checks (7 total, need 4)
           - Candlestick check: raw geometry (close>open + lower shadow) replaces pattern engine
             so it works identically in live and backtest contexts
+          - BB_PctB threshold widened 0.25→0.35: captures more pullback setups near lower band
         """
         candle_range  = float(row.get("High", 0)) - float(row.get("Low", 0))
         lower_shadow  = float(row.get("Open", 0)) - float(row.get("Low", 0))  # BUY candle shadow
@@ -586,7 +587,9 @@ class AIPredictionEngine:
             and candle_range > 0
             and (lower_shadow / candle_range) > 0.3                  # lower shadow ≥ 30% of range
         )
-        # Also accept pattern engine if it fires (live mode)
+        # In live mode, pattern engine can override geometry (e.g., a bearish engulfing
+        # after a gap-up: technically bearish body but pattern engine flagged it).
+        # This means geometry check never acts as backstop when pattern engine is active.
         if patterns.get("any_bullish", False):
             bullish_candle = True
 
