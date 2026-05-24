@@ -423,3 +423,21 @@ def test_astra1_rsi_exactly_50_does_not_pass():
     patterns = {"any_bullish": False}
     _, _, checks = ai_engine._check_buy_confirmations(row, patterns, macro_bull=True)
     assert checks["RSI pullback & recovering"] is False, "RSI=50 is not < 50"
+
+
+def test_training_universe_has_83_symbols():
+    """Training universe must match the evaluator universe (83 symbols)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "train_models",
+        "/Users/avinashpriyam/Desktop/trading-app/react-algo-trading-app/backend/train_models.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        pass
+    from app.services.intraday_universe import INTRADAY_UNIVERSE
+    assert set(mod.EQUITY_TRAIN_SYMBOLS) == set(INTRADAY_UNIVERSE), (
+        f"Expected {len(INTRADAY_UNIVERSE)} symbols, got {len(mod.EQUITY_TRAIN_SYMBOLS)}"
+    )

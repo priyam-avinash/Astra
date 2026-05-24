@@ -22,15 +22,9 @@ logger = logging.getLogger(__name__)
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "app", "models", "saved_models")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-# Training symbols — broad NIFTY 50 sample for robustness, not overfitting to one stock
-EQUITY_TRAIN_SYMBOLS = [
-    "^NSEI",       # NIFTY 50 Index — best primary
-    "RELIANCE.NS",
-    "TCS.NS",
-    "HDFCBANK.NS",
-    "INFY.NS",
-    "ICICIBANK.NS",
-]
+# Training symbols — full INTRADAY_UNIVERSE for broad generalisation
+# This eliminates the distribution shift that caused LSTM to only know NIFTY 50 mega-caps
+from app.services.intraday_universe import INTRADAY_UNIVERSE as EQUITY_TRAIN_SYMBOLS
 
 CRYPTO_TRAIN_SYMBOLS = [
     "BTC-USD",
@@ -173,7 +167,7 @@ def main():
 
     # ── 1. Fetch combined equity data ──
     logger.info("\n📥 Fetching equity training data (multi-symbol)...")
-    equity_df = aggregate_equity_data(ai_engine, EQUITY_TRAIN_SYMBOLS, period="5y", interval="1d")
+    equity_df = aggregate_equity_data(ai_engine, EQUITY_TRAIN_SYMBOLS, period="2y", interval="1d")
     if equity_df.empty:
         logger.warning("⚠️  No equity data fetched. Trying with reduced symbol list...")
         equity_df = aggregate_equity_data(ai_engine, ["^NSEI"], period="2y", interval="1d")
