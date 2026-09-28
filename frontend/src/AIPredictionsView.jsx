@@ -32,7 +32,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
   const [predictions, setPredictions] = useState([]);
   const [scanNote, setScanNote]       = useState('');
   const [filterTab, setFilterTab]     = useState('All');
-  const [engine, setEngine]           = useState('astra_ai'); // Default to Aggressive AI for signals
+  const [engine, setEngine]           = useState('astra'); // v1.13: Safe engine by default (AI engine is often all-HOLD in bear regimes)
   const [pushingId, setPushingId]     = useState(null);
   const [pushError, setPushError]     = useState(null);
   const [loading, setLoading]         = useState(false);
@@ -126,6 +126,8 @@ export default function AIPredictionsView({ queue, setQueue }) {
        .filter(r => !queue.some(q => q.asset === r.asset))
        .sort((a, b) => b.confidence - a.confidence);
       setPredictions(rows);
+      const eqCount = rows.filter(r => r.type !== 'Commodity').length;
+      if (rows.length && !eqCount) setScanNote(`No stock setups from ${eq.universe_size || 0} stocks with this engine right now (macro filter / all HOLD). Try Astra 1.0.`);
       if (!rows.length) setScanNote(`No BUY/SELL setups from ${eq.universe_size || 0} stocks right now. The model is holding, not failing.`);
     } catch (e) {
       setPushError(`Scan failed: ${e.message}. Is the backend running?`);
@@ -182,6 +184,10 @@ export default function AIPredictionsView({ queue, setQueue }) {
         <div style={{ margin: '12px 0', padding: '10px 16px', borderRadius: 10, background: 'rgba(239,68,68,.08)', border: '1px solid rgba(239,68,68,.3)', color: '#f87171', fontSize: '0.85rem' }}>
           ⚠ {pushError}
         </div>
+      )}
+
+      {!loading && scanNote && filtered.length > 0 && (
+        <div style={{ margin: '12px 0 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>ℹ {scanNote}</div>
       )}
 
       <div className="glass-panel" style={{ marginTop: '20px', overflow: 'hidden' }}>

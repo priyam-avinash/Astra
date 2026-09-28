@@ -23,7 +23,7 @@ const SECTORS = [
 ];
 
 export default function ScannerView() {
-  const [engine,   setEngine]   = useState('astra_ai');
+  const [engine,   setEngine]   = useState('astra');   // v1.13: rules engine by default
   const [signal,   setSignal]   = useState('');
   const [sector,   setSector]   = useState('');
   const [topK,     setTopK]     = useState(20);
@@ -204,7 +204,9 @@ export default function ScannerView() {
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 16, fontWeight: 600 }}>No signals found</div>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
-              Try lowering the minimum confidence or changing the engine
+              {engine !== 'astra'
+                ? 'When NIFTY is below its 200-day average (bear regime) the AI engines block new BUYs. Try ASTRA 1.0 (Rules) or a lower minimum confidence.'
+                : 'Try lowering the minimum confidence or changing the engine'}
             </div>
           </div>
         </div>

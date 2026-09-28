@@ -222,6 +222,12 @@ def analyze_symbol(symbol: str, interval: str = "1d", period: str = "6mo", engin
     
     try:
         result = ai_engine.analyze_market_data(symbol.upper(), interval=interval, period=period, engine=engine)
+        if isinstance(result, dict):
+            from app.services.market_data import normalize_symbol
+            resolved = normalize_symbol(symbol)
+            result.setdefault("resolved_symbol", resolved)
+            r = resolved.upper()
+            result.setdefault("currency", "INR" if (r.endswith((".NS", ".BO", "-INR")) or r.startswith(("^NSE", "^CNX", "^BSE"))) else "USD")
         return _sanitize(result)
     except Exception as e:
         logger.error(f"Analysis failed for {symbol}: {e}")

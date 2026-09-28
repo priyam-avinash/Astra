@@ -64,8 +64,23 @@ function Gauge({ value, label }) {
 }
 
 /* ── HELPERS ── */
+// v1.13: currency follows the resolved asset (AAPL → $, RELIANCE.NS → ₹, BTC-USD → $)
+let CUR = '₹';
+const currencyFor = (asset) => {
+  const a = (asset || '').toUpperCase();
+  if (/\.(NS|BO)$/.test(a) || /-INR$/.test(a) || /^\^(NSE|CNX|BSE)/.test(a)) return '₹';
+  return '$';
+};
+const exchangeFor = (asset) => {
+  const a = (asset || '').toUpperCase();
+  if (/\.BO$/.test(a)) return 'BSE';
+  if (/\.NS$/.test(a) || /^\^(NSE|CNX)/.test(a)) return 'NSE';
+  if (/-(USD|USDT|INR)$/.test(a)) return 'CRYPTO';
+  if (/=F$/.test(a)) return 'FUTURES';
+  return 'US';
+};
 const fmt = (v) => v != null ? Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
-const fmtBig = (v) => { if (!v) return '—'; if (v >= 1e12) return '₹' + (v / 1e12).toFixed(2) + 'T'; if (v >= 1e9) return '₹' + (v / 1e9).toFixed(2) + 'B'; if (v >= 1e7) return '₹' + (v / 1e7).toFixed(2) + 'Cr'; if (v >= 1e5) return '₹' + (v / 1e5).toFixed(2) + 'L'; return '₹' + v.toLocaleString('en-IN'); };
+const fmtBig = (v) => { if (!v) return '—'; if (v >= 1e12) return CUR + (v / 1e12).toFixed(2) + 'T'; if (v >= 1e9) return CUR + (v / 1e9).toFixed(2) + 'B'; if (v >= 1e7) return CUR + (v / 1e7).toFixed(2) + 'Cr'; if (v >= 1e5) return CUR + (v / 1e5).toFixed(2) + 'L'; return CUR + v.toLocaleString('en-IN'); };
 const fmtPct = (v) => v != null ? (v * 100).toFixed(2) + '%' : '—';
 const fmtVol = (v) => { if (!v) return '0'; if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B'; if (v >= 1e7) return (v / 1e7).toFixed(2) + 'Cr'; if (v >= 1e5) return (v / 1e5).toFixed(2) + 'L'; if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K'; return v.toString(); };
 
@@ -96,9 +111,9 @@ function FinancialsTab({ fin }) {
               <KDRow label="Market capitalization" value={fmtBig(k.marketCap)} />
               <KDRow label="Dividend yield" value={fmtPct(k.dividendYield)} />
               <KDRow label="P/E ratio (TTM)" value={k.trailingPE?.toFixed(2) || '—'} />
-              <KDRow label="EPS (TTM)" value={k.trailingEps ? '₹' + k.trailingEps.toFixed(2) : '—'} />
-              <KDRow label="52-week high" value={'₹' + fmt(k.fiftyTwoWeekHigh)} />
-              <KDRow label="52-week low" value={'₹' + fmt(k.fiftyTwoWeekLow)} />
+              <KDRow label="EPS (TTM)" value={k.trailingEps ? CUR + k.trailingEps.toFixed(2) : '—'} />
+              <KDRow label="52-week high" value={CUR + fmt(k.fiftyTwoWeekHigh)} />
+              <KDRow label="52-week low" value={CUR + fmt(k.fiftyTwoWeekLow)} />
               <KDRow label="Average volume" value={fmtVol(k.averageVolume)} />
               <KDRow label="Beta" value={k.beta?.toFixed(2) || '—'} />
             </div>
@@ -152,7 +167,7 @@ function FinancialsTab({ fin }) {
           <h3 style={{ ...S.secTitle, fontSize: 18, marginBottom: 16 }}>Dividend summary</h3>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 24 }}>
             <div><div style={S.kdLabel}>Dividend yield (TTM)</div><div style={S.kdValue}>{fmtPct(d.dividendYield)}</div></div>
-            <div><div style={S.kdLabel}>Annual dividend rate</div><div style={S.kdValue}>{d.dividendRate ? '₹' + d.dividendRate.toFixed(2) : '—'}</div></div>
+            <div><div style={S.kdLabel}>Annual dividend rate</div><div style={S.kdValue}>{d.dividendRate ? CUR + d.dividendRate.toFixed(2) : '—'}</div></div>
             <div><div style={S.kdLabel}>Payout ratio</div><div style={S.kdValue}>{fmtPct(d.payoutRatio)}</div></div>
           </div>
         </div>
@@ -166,8 +181,8 @@ function FinancialsTab({ fin }) {
             <KDRow label="P/E (Forward)" value={k.forwardPE?.toFixed(2) || '—'} />
             <KDRow label="P/B" value={k.priceToBook?.toFixed(2) || '—'} />
             <KDRow label="P/S" value={k.priceToSales?.toFixed(2) || '—'} />
-            <KDRow label="EPS (TTM)" value={k.trailingEps ? '₹' + k.trailingEps.toFixed(2) : '—'} />
-            <KDRow label="EPS (Forward)" value={k.forwardEps ? '₹' + k.forwardEps.toFixed(2) : '—'} />
+            <KDRow label="EPS (TTM)" value={k.trailingEps ? CUR + k.trailingEps.toFixed(2) : '—'} />
+            <KDRow label="EPS (Forward)" value={k.forwardEps ? CUR + k.forwardEps.toFixed(2) : '—'} />
             <KDRow label="Market cap" value={fmtBig(k.marketCap)} />
             <KDRow label="Beta" value={k.beta?.toFixed(2) || '—'} />
           </div>
@@ -226,9 +241,9 @@ function ForecastsTab({ fin, currentPrice }) {
           <div style={{ flex: 1 }}>
             <div style={{ position: 'relative', height: 40, background: '#131722', borderRadius: 8, overflow: 'hidden', margin: '8px 0' }}>
               <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 12px', fontSize: 11, color: '#787b86' }}>
-                <span>₹{fmt(f.targetLowPrice)}</span>
-                <span style={{ color: '#fff', fontWeight: 700 }}>₹{fmt(f.targetMeanPrice)}</span>
-                <span>₹{fmt(f.targetHighPrice)}</span>
+                <span>{CUR}{fmt(f.targetLowPrice)}</span>
+                <span style={{ color: '#fff', fontWeight: 700 }}>{CUR}{fmt(f.targetMeanPrice)}</span>
+                <span>{CUR}{fmt(f.targetHighPrice)}</span>
               </div>
               {/* Current price marker */}
               {currentPrice && f.targetLowPrice && f.targetHighPrice && (
@@ -256,10 +271,10 @@ function ForecastsTab({ fin, currentPrice }) {
         <div style={S.card}>
           <h3 style={{ ...S.secTitle, fontSize: 16, marginBottom: 12 }}>Price targets</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target high</span><span style={{ color: '#26a69a', fontWeight: 600 }}>₹{fmt(f.targetHighPrice)}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target mean</span><span style={{ color: '#fff', fontWeight: 600 }}>₹{fmt(f.targetMeanPrice)}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target median</span><span style={{ color: '#fff', fontWeight: 600 }}>₹{fmt(f.targetMedianPrice)}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target low</span><span style={{ color: '#ef5350', fontWeight: 600 }}>₹{fmt(f.targetLowPrice)}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target high</span><span style={{ color: '#26a69a', fontWeight: 600 }}>{CUR}{fmt(f.targetHighPrice)}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target mean</span><span style={{ color: '#fff', fontWeight: 600 }}>{CUR}{fmt(f.targetMeanPrice)}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target median</span><span style={{ color: '#fff', fontWeight: 600 }}>{CUR}{fmt(f.targetMedianPrice)}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#787b86' }}>Target low</span><span style={{ color: '#ef5350', fontWeight: 600 }}>{CUR}{fmt(f.targetLowPrice)}</span></div>
           </div>
         </div>
         <div style={S.card}>
@@ -323,6 +338,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
   }, [data, symbol, subscribe]);
 
   const livePrice = prices[symbol]?.price || data?.current_price;
+  CUR = data?.currency ? (data.currency === 'INR' ? '₹' : '$') : currencyFor(data?.resolved_symbol || symbol);
 
   // ── Agent Panel state ──────────────────────────────────────────────
   const [llmEnabled, setLlmEnabled]             = useState(false);
@@ -509,7 +525,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
         lineWidth: 1.5,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `Entry ₹${Number(entryP).toFixed(2)}`,
+        title: `Entry ${CUR}${Number(entryP).toFixed(2)}`,
       });
     }
     if (targetP && targetP > 0) {
@@ -519,7 +535,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
         lineWidth: 1.5,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `Target ₹${Number(targetP).toFixed(2)}`,
+        title: `Target ${CUR}${Number(targetP).toFixed(2)}`,
       });
     }
     if (slP && slP > 0) {
@@ -529,7 +545,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
         lineWidth: 1.5,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `SL ₹${Number(slP).toFixed(2)}`,
+        title: `SL ${CUR}${Number(slP).toFixed(2)}`,
       });
     }
 
@@ -609,13 +625,13 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
               <div style={{ flex: 1 }}>
                 <h1 style={{ fontSize: 28, fontWeight: 700, lineHeight: 1.1, color: '#fff', margin: 0 }}>{fin?.profile?.name || data.asset || symbol}</h1>
                 <div style={{ fontSize: 13, color: '#787b86', marginTop: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ background: '#2962ff22', color: '#2962ff', padding: '2px 8px', borderRadius: 4, fontWeight: 600, fontSize: 11 }}>NSE</span>
+                  <span style={{ background: '#2962ff22', color: '#2962ff', padding: '2px 8px', borderRadius: 4, fontWeight: 600, fontSize: 11 }}>{exchangeFor(data.resolved_symbol || data.asset || symbol)}</span>
                   <span>•</span><span>{fin?.profile?.sector || (data.engine?.toUpperCase() || 'ASTRA') + ' Engine'}</span>
                   {fin?.profile?.industry && <><span>•</span><span>{fin.profile.industry}</span></>}
                 </div>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 32, fontWeight: 700, color: '#fff', letterSpacing: -1 }}>₹{livePrice?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
+                <div style={{ fontSize: 32, fontWeight: 700, color: '#fff', letterSpacing: -1 }}>{CUR}{livePrice?.toLocaleString(CUR === '₹' ? 'en-IN' : 'en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                 <div style={{ fontSize: 11, fontWeight: 600, color: isLive ? '#22c55e' : '#f59e0b',
                               background: isLive ? '#22c55e22' : '#f59e0b22',
                               padding: '2px 8px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -669,16 +685,16 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
                   </div>
                   <div ref={chartContainerRef} style={{ width: '100%', height: 420 }}/>
                 </div>
-                <div><h2 style={S.secTitle}>Key data points</h2><div style={{ ...S.kdGrid, marginTop: 16, borderTop: '1px solid #2a2e39' }}><KDRow label="Volume" value={kd.volume}/><KDRow label="Previous close" value={'₹'+kd.prevClose}/><KDRow label="Open" value={'₹'+kd.open}/><KDRow label="Day's range" value={kd.dayRange}/></div></div>
+                <div><h2 style={S.secTitle}>Key data points</h2><div style={{ ...S.kdGrid, marginTop: 16, borderTop: '1px solid #2a2e39' }}><KDRow label="Volume" value={kd.volume}/><KDRow label="Previous close" value={CUR+kd.prevClose}/><KDRow label="Open" value={CUR+kd.open}/><KDRow label="Day's range" value={kd.dayRange}/></div></div>
                 <div style={S.card}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <h2 style={{ ...S.secTitle, fontSize: 18 }}>ASTRA Signal</h2>
                     <span style={S.signalBadge(data.signal)}>{data.signal} — {data.confidence?.toFixed(1)}%</span>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginTop: 16 }}>
-                    <div><span style={S.kdLabel}>Entry Price</span><div style={{ ...S.kdValue, color: '#2962ff' }}>₹{fmt(data.entry_price)}</div></div>
-                    <div><span style={S.kdLabel}>Target</span><div style={{ ...S.kdValue, color: '#26a69a' }}>₹{fmt(data.target)}</div></div>
-                    <div><span style={S.kdLabel}>Stop Loss</span><div style={{ ...S.kdValue, color: '#ef5350' }}>₹{fmt(data.stop_loss)}</div></div>
+                    <div><span style={S.kdLabel}>Entry Price</span><div style={{ ...S.kdValue, color: '#2962ff' }}>{CUR}{fmt(data.entry_price)}</div></div>
+                    <div><span style={S.kdLabel}>Target</span><div style={{ ...S.kdValue, color: '#26a69a' }}>{CUR}{fmt(data.target)}</div></div>
+                    <div><span style={S.kdLabel}>Stop Loss</span><div style={{ ...S.kdValue, color: '#ef5350' }}>{CUR}{fmt(data.stop_loss)}</div></div>
                   </div>
                 </div>
                 <div>
