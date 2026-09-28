@@ -1,5 +1,11 @@
 import React from 'react';
 
+const inr = (v) => {
+  const n = Number(v);
+  return v == null || Number.isNaN(n) ? '—'
+    : n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
 export default function HistoryView({ history }) {
   return (
     <div className="animate-fade-in">
@@ -40,10 +46,10 @@ export default function HistoryView({ history }) {
                     {record.action}
                   </span>
                 </td>
-                <td style={{ padding: '16px 24px' }}>₹{record.price}</td>
+                <td style={{ padding: '16px 24px' }}>₹{inr(record.price)}</td>
                 <td style={{ padding: '16px 24px' }}>{record.qty}</td>
                 <td style={{ padding: '16px 24px', fontWeight: 700, color: record.pnl > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
-                  {record.pnl > 0 ? '+' : ''}₹{record.pnl}
+                  {record.pnl > 0 ? '+' : ''}₹{inr(record.pnl)}
                 </td>
                 <td style={{ padding: '16px 24px' }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)' }}>

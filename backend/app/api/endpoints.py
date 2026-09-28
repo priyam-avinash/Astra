@@ -1428,3 +1428,81 @@ def get_quote(symbol: str, current_user: User = Depends(get_current_user)):
     from app.services.market_data import market_data, normalize_symbol
     info = market_data.get_quote_info(symbol)
     return {"symbol": normalize_symbol(symbol), **info}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  DASHBOARD DATA (v1.13) — replaces hard-coded dashboard numbers
+# ════════════════════════════════════════════════════════════════════════════
+
+_PULSE_INDICES = [
+    ("NIFTY", "NIFTY 50", "^NSEI"),
+    ("BANKNIFTY", "BANK NIFTY", "^NSEBANK"),
+    ("MIDCAP", "MIDCAP 50", "^NSEMDCP50"),
+    ("IT", "IT INDEX", "^CNXIT"),
+    ("PHARMA", "PHARMA", "^CNXPHARMA"),
+]
+_PULSE_CACHE: dict = {}
+
+
+@router.get("/api/market/pulse")
+def market_pulse(current_user: User = Depends(get_current_user)):
+    """Live index levels + day change for the dashboard strip (cached 60s)."""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+    from app.services.market_data import market_data
+    hit = _PULSE_CACHE.get("v")
+    if hit and _t.time() - hit[0] < 60:
+        return hit[1]
+
+    def one(item):
+        key, name, sym = item
+        row = {"id": key, "name": name, "symbol": sym, "price": None, "change_pct": None, "source": None}
+        try:
+            df = market_data.get_ohlcv(sym, period="1mo", interval="1d")
+            if len(df) >= 2:
+                # Yahoo's daily series includes today's running bar during market hours
+                last, prev = float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
+                row.update(price=round(last, 2), change_pct=round((last / prev - 1) * 100, 2),
+                           source=df.attrs.get("source"), stale=bool(df.attrs.get("stale")))
+        except Exception as e:
+            logger.debug(f"pulse {sym}: {e}")
+        return row
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        rows = list(pool.map(one, _PULSE_INDICES))
+    out = {"indices": rows, "as_of": datetime.now().isoformat(timespec="seconds")}
+    _PULSE_CACHE["v"] = (_t.time(), out)
+    return out
+
+
+@router.get("/api/portfolio/summary")
+def portfolio_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Paper account value = starting capital + realised P&L + unrealised P&L."""
+    from app.services.market_data import market_data
+    capital = float(os.getenv("PAPER_STARTING_CAPITAL", "1000000"))
+    realised = float(db.query(func.sum(TradeRecord.pnl)).filter(
+        TradeRecord.user_id == current_user.id).scalar() or 0.0)
+    today_realised = float(db.query(func.sum(TradeRecord.pnl)).filter(
+        TradeRecord.user_id == current_user.id,
+        func.date(TradeRecord.timestamp) == date.today()).scalar() or 0.0)
+    unrealised, invested = 0.0, 0.0
+    for p in db.query(ActivePosition).filter(ActivePosition.user_id == current_user.id,
+                                             ActivePosition.status == "OPEN").all():
+        q = market_data.get_quote_info(p.asset)
+        ltp = q["price"] or p.entry_price
+        sign = 1 if (p.direction or "BUY").upper() == "BUY" else -1
+        unrealised += sign * (ltp - p.entry_price) * p.quantity
+        invested += p.entry_price * p.quantity
+    value = capital + realised + unrealised
+    day_pnl = today_realised + unrealised
+    return {
+        "starting_capital": capital,
+        "portfolio_value": round(value, 2),
+        "realised_pnl": round(realised, 2),
+        "unrealised_pnl": round(unrealised, 2),
+        "invested": round(invested, 2),
+        "cash": round(capital + realised - invested, 2),
+        "day_pnl": round(day_pnl, 2),
+        "day_pnl_pct": round(day_pnl / (value - day_pnl) * 100, 2) if value - day_pnl else 0.0,
+        "mode": "PAPER",
+    }

@@ -19,6 +19,7 @@ import ScannerView        from './ScannerView';
 import CryptoView         from './CryptoView';
 import IntradayView       from './IntradayView';
 import StrategiesView     from './StrategiesView';
+import CommoditiesView    from './CommoditiesView';
 import LoginView          from './LoginView';
 import RegisterView       from './RegisterView';
 
@@ -35,13 +36,20 @@ function isMarketOpen() {
   return day >= 1 && day <= 5 && mins >= 555 && mins <= 930; // 09:15–15:30
 }
 
+// Index strip placeholders — live values come from /api/market/pulse
 const MARKET_INDICES = [
-  { id: 'NIFTY',    name: 'NIFTY 50',   symbol: '^NSEI',     price: '24,537',  chg: '+0.82%', up: true  },
-  { id: 'BANKNIFTY',name: 'BANK NIFTY', symbol: '^NSEBANK',  price: '52,314',  chg: '+1.14%', up: true  },
-  { id: 'MIDCAP',   name: 'MIDCAP',     symbol: '^CNXMDCP',  price: '11,208',  chg: '-0.31%', up: false },
-  { id: 'IT',       name: 'IT INDEX',   symbol: '^CNXIT',    price: '38,921',  chg: '+0.56%', up: true  },
-  { id: 'PHARMA',   name: 'PHARMA',     symbol: '^CNXPHARMA',price: '21,745',  chg: '-0.18%', up: false },
+  { id: 'NIFTY',    name: 'NIFTY 50',   symbol: '^NSEI' },
+  { id: 'BANKNIFTY',name: 'BANK NIFTY', symbol: '^NSEBANK' },
+  { id: 'MIDCAP',   name: 'MIDCAP 50',  symbol: '^NSEMDCP50' },
+  { id: 'IT',       name: 'IT INDEX',   symbol: '^CNXIT' },
+  { id: 'PHARMA',   name: 'PHARMA',     symbol: '^CNXPHARMA' },
 ];
+
+const authHeaders = () => {
+  const t = localStorage.getItem('astra_token');
+  return t ? { Authorization: `Bearer ${t}` } : {};
+};
+const fmtNum = (n, d = 2) => (n == null ? '—' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: d, minimumFractionDigits: d }));
 
 const NAV_GROUPS = [
   {
@@ -227,7 +235,7 @@ export default function App() {
       case 'Strategies':
         return <StrategiesView />;
       case 'Commodities':
-        return <ComingSoon title="Commodities" subtitle="Gold · Silver · Crude · Natural Gas · Copper" icon={<Package size={32} />} />;
+        return <CommoditiesView setQueue={setQueue} />;
       case 'AI Predictions':
         return <AIPredictionsView queue={queue} setQueue={setQueue} />;
       case 'Auto Mode':
@@ -454,6 +462,26 @@ export default function App() {
 
 // ── Dashboard View ─────────────────────────────────────────────────
 function Dashboard({ positions, queue, livePnL, onNavigate, onIndexClick, onQuickScan }) {
+  const [pulse, setPulse] = useState(MARKET_INDICES);
+  const [summary, setSummary] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const [p, s] = await Promise.all([
+          fetch(`${API_URL}/api/market/pulse`, { headers: authHeaders() }).then(r => (r.ok ? r.json() : null)),
+          fetch(`${API_URL}/api/portfolio/summary`, { headers: authHeaders() }).then(r => (r.ok ? r.json() : null)),
+        ]);
+        if (!alive) return;
+        if (p?.indices) setPulse(p.indices);
+        if (s) setSummary(s);
+      } catch (_) {}
+    };
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [positions.length]);
+  const dayPct = summary?.day_pnl_pct ?? 0;
   return (
     <div className="dashboard-home animate-fade-in">
 
@@ -461,10 +489,11 @@ function Dashboard({ positions, queue, livePnL, onNavigate, onIndexClick, onQuic
       <div className="metrics-grid">
         <MetricCard
           icon={<Briefcase size={16} />}
-          title="Portfolio Value"
-          value="₹12,45,670"
-          change="+2.4% today"
-          positive
+          title="Portfolio Value (paper)"
+          value={summary ? `₹${fmtNum(summary.portfolio_value, 0)}` : '—'}
+          change={summary ? `${dayPct >= 0 ? '+' : ''}${dayPct}% today` : 'Loading…'}
+          positive={dayPct >= 0}
+          negative={dayPct < 0}
         />
         <MetricCard
           icon={livePnL >= 0 ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
@@ -500,17 +529,19 @@ function Dashboard({ positions, queue, livePnL, onNavigate, onIndexClick, onQuic
           </button>
         </div>
         <div className="market-pulse-strip">
-          {MARKET_INDICES.map(idx => (
+          {pulse.map(idx => (
             <div
               key={idx.id}
               className="pulse-chip"
               onClick={() => onIndexClick(idx.symbol, 'indian')}
             >
               <span className="pulse-chip-name">{idx.name}</span>
-              <span className="pulse-chip-price">{idx.price}</span>
-              <span className={`pulse-chip-change ${idx.up ? 'up' : 'down'}`}>
-                {idx.up ? '▲' : '▼'} {idx.chg}
-              </span>
+              <span className="pulse-chip-price">{idx.price != null ? fmtNum(idx.price) : '—'}</span>
+              {idx.change_pct != null && (
+                <span className={`pulse-chip-change ${idx.change_pct >= 0 ? 'up' : 'down'}`}>
+                  {idx.change_pct >= 0 ? '▲' : '▼'} {idx.change_pct >= 0 ? '+' : ''}{idx.change_pct}%
+                </span>
+              )}
             </div>
           ))}
         </div>

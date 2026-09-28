@@ -137,7 +137,7 @@ export default function CryptoView({ onNavigateToAnalysis }) {
 
   const API = API_URL;
   const headers = () => {
-    const t = localStorage.getItem('token');
+    const t = localStorage.getItem('astra_token');
     return t ? { Authorization: `Bearer ${t}` } : {};
   };
 

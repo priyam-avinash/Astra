@@ -3,27 +3,29 @@ import { Send, Activity, DollarSign, List, BarChart2, Clock } from 'lucide-react
 
 import { API_URL } from './config';
 
-const mockDepth = () => ({
-  bids: Array.from({length: 5}, (_, i) => ({ price: 2950 - i*2, qty: Math.floor(Math.random()*500) + 100 })),
-  asks: Array.from({length: 5}, (_, i) => ({ price: 2955 + i*2, qty: Math.floor(Math.random()*500) + 100 })),
-});
+// v1.13: live quote panel replaces the random "market depth" mock
+const authHeaders = () => {
+  const t = localStorage.getItem('astra_token');
+  return t ? { Authorization: `Bearer ${t}` } : {};
+};
 
 export default function ManualTradeView() {
   const [assetType, setAssetType] = useState('Equity'); // New: Equity vs Commodity vs F&O
   const [asset, setAsset] = useState('RELIANCE.NS');
   const [action, setAction] = useState('BUY');
   const [quantity, setQuantity] = useState(10);
-  const [price, setPrice] = useState(2950.0);
+  const [price, setPrice] = useState('');
   const [targetPrice, setTargetPrice] = useState('');
   const [stopLoss, setStopLoss] = useState('');
-  const [depth, setDepth] = useState(mockDepth());
+  const [quote, setQuote] = useState(null);
+  const [orderMsg, setOrderMsg] = useState(null);
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState([]);
 
   const suggestions = useMemo(() => ({
     Equity: ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'SBIN.NS'],
     Commodity: ['GC=F', 'CL=F', 'SI=F', 'HG=F', 'NG=F'],
-    'F&O': ['NIFTY24MARFUT', 'BANKNIFTY24MARFUT', 'FINNIFTY24MARFUT', 'RELIANCE24MARFUT']
+    'F&O': ['^NSEI', '^NSEBANK', 'NIFTYBEES.NS', 'BANKBEES.NS']   // index / index-ETF proxies (paper)
   }), []);
 
   useEffect(() => {
@@ -31,27 +33,41 @@ export default function ManualTradeView() {
     setAsset(suggestions[assetType][0]);
   }, [assetType, suggestions]);
 
+  // Live quote for the selected asset (refresh every 10s); pre-fills the price
   useEffect(() => {
-    const itv = setInterval(() => setDepth(mockDepth()), 2000);
+    let alive = true, first = true;
+    const load = async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/quote/${encodeURIComponent(asset.toUpperCase())}`, { headers: authHeaders() });
+        const q = r.ok ? await r.json() : null;
+        if (!alive || !q) return;
+        setQuote(q);
+        if (first && q.price > 0) { setPrice(q.price); first = false; }
+      } catch (_) { if (alive) setQuote(null); }
+    };
+    setQuote(null); setPrice('');
+    const t = setTimeout(load, 300);          // debounce typing
+    const itv = setInterval(load, 10000);
+    return () => { alive = false; clearTimeout(t); clearInterval(itv); };
+  }, [asset]);
+
+  useEffect(() => {
     const fetchHistory = () => {
-      const token = localStorage.getItem('token');
-      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+      const headers = authHeaders();
       fetch(`${API_URL}/api/history`, { headers })
       .then(r => r.json())
       .then(d => setHistory(d.history?.filter(h => h.status && h.status.includes('Manual')) || []));
     };
     fetchHistory();
     const hitv = setInterval(fetchHistory, 5000);
-    return () => { clearInterval(itv); clearInterval(hitv); };
+    return () => { clearInterval(hitv); };
   }, []);
 
   const handleExecute = async (e) => {
     e.preventDefault();
     setLoading(true);
     try {
-      const token = localStorage.getItem('token');
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const headers = { 'Content-Type': 'application/json', ...authHeaders() };
       
       const resp = await fetch(`${API_URL}/api/execute/manual`, {
         method: 'POST',
@@ -65,10 +81,11 @@ export default function ManualTradeView() {
           stop_loss: stopLoss ? parseFloat(stopLoss) : null
         })
       });
-      if (!resp.ok) throw new Error('Execution Failed');
-      alert(`Order Placed: ${action} ${quantity} ${asset}`);
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(body.detail || `Order rejected (HTTP ${resp.status})`);
+      setOrderMsg({ ok: true, text: `Paper order filled: ${action} ${quantity} ${asset.toUpperCase()} @ ₹${Number(body.executed_price).toFixed(2)} (${body.order_id})` });
     } catch (err) {
-      alert(err.message);
+      setOrderMsg({ ok: false, text: err.message });
     } finally {
       setLoading(false);
     }
@@ -140,38 +157,27 @@ export default function ManualTradeView() {
           </form>
         </div>
 
-        {/* MARKET DEPTH */}
+        {/* LIVE QUOTE */}
         <div className="glass-panel" style={{ padding: '24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '20px' }}>
             <BarChart2 size={18} color="rgba(255,255,255,0.4)" />
-            <h4 style={{ margin: 0, fontSize: '0.85rem', color: 'rgba(255,255,255,0.4)' }}>MARKET DEPTH (L2)</h4>
+            <h4 style={{ margin: 0, fontSize: '0.85rem', color: 'rgba(255,255,255,0.4)' }}>LIVE QUOTE · {asset.toUpperCase()}</h4>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1px', background: 'rgba(255,255,255,0.05)' }}>
-            <div style={{ background: 'var(--panel-bg)', padding: '12px' }}>
-              <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', marginBottom: 8 }}>BIDS (BUY)</div>
-              {depth.bids.map((b,i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 4, position: 'relative' }}>
-                  <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, background: 'rgba(34,197,94,0.05)', width: `${(b.qty/500)*100}%`, zIndex: 0 }}/>
-                  <span style={{ color: '#22c55e', position: 'relative' }}>{b.price.toFixed(2)}</span>
-                  <span style={{ position: 'relative' }}>{b.qty}</span>
-                </div>
-              ))}
-            </div>
-            <div style={{ background: 'var(--panel-bg)', padding: '12px' }}>
-              <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', marginBottom: 8 }}>ASKS (SELL)</div>
-              {depth.asks.map((a,i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: 4, position: 'relative' }}>
-                  <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, background: 'rgba(239,68,68,0.05)', width: `${(a.qty/500)*100}%`, zIndex: 0 }}/>
-                  <span style={{ color: '#ef4444', position: 'relative' }}>{a.price.toFixed(2)}</span>
-                  <span style={{ position: 'relative' }}>{a.qty}</span>
-                </div>
-              ))}
-            </div>
+          <div style={{ fontSize: '2rem', fontWeight: 800, marginBottom: 6 }}>
+            {quote?.price > 0 ? `₹${Number(quote.price).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (quote ? 'Unavailable' : 'Loading…')}
           </div>
-          <div style={{ marginTop: '16px', textAlign: 'center', padding: '12px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px' }}>
-            <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.3)', marginRight: 8 }}>SPREAD:</span>
-            <span style={{ fontWeight: 700, color: 'var(--color-primary)' }}>₹5.00 (0.17%)</span>
+          <div style={{ fontSize: '0.75rem', color: quote?.stale ? '#f59e0b' : 'rgba(255,255,255,0.4)' }}>
+            {quote?.source ? `Source: ${quote.source}${quote.stale ? ' (stale — orders will be rejected)' : ''}` : ''}
+            {quote?.ts ? ` · ${quote.ts.slice(11, 19)}` : ''}
           </div>
+          <div style={{ marginTop: 20, padding: 12, background: 'rgba(255,255,255,0.02)', borderRadius: 8, fontSize: '0.75rem', color: 'rgba(255,255,255,0.45)', lineHeight: 1.6 }}>
+            Paper trading: orders fill at the live price ± 0.05% slippage, with 0.03% brokerage. No real orders are placed.
+          </div>
+          {orderMsg && (
+            <div style={{ marginTop: 16, padding: 12, borderRadius: 8, fontSize: '0.8rem',
+                          background: orderMsg.ok ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
+                          color: orderMsg.ok ? '#22c55e' : '#ef4444' }}>{orderMsg.text}</div>
+          )}
         </div>
       </div>
 

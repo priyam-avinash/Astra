@@ -13,18 +13,24 @@ import { API_URL } from './config';
  * 3. Removed from this local predictions list
  */
 
-const MOCK_SEEDS = [
-  { id: 'm1', asset: 'RELIANCE.NS', direction: 'BUY',  entry: 1381, target: 1480, stopLoss: 1350, confidence: 74, type: 'Equity',    time: '5 mins ago' },
-  { id: 'm2', asset: 'TCS.NS',      direction: 'SELL', entry: 3960, target: 3750, stopLoss: 4050, confidence: 68, type: 'Equity',    time: '18 mins ago' },
-  { id: 'm3', asset: 'GC=F',        direction: 'BUY',  entry: 2678, target: 2720, stopLoss: 2580, confidence: 71, type: 'Commodity', time: '1 hr ago' },
-  { id: 'm4', asset: '^NSEI',       direction: 'HOLD', entry: 23200, target: 23500, stopLoss: 22000, confidence: 55, type: 'F&O',   time: '2 hrs ago' },
-  { id: 'm5', asset: 'HDFCBANK.NS', direction: 'SELL', entry: 1652, target: 1580, stopLoss: 1720, confidence: 61, type: 'Equity',   time: '3 hrs ago' },
-];
+// v1.13: predictions come from the live scanners (no more mock seeds)
+const authHeaders = () => {
+  const t = localStorage.getItem('astra_token');
+  return t ? { Authorization: `Bearer ${t}` } : {};
+};
+
+const money = (pred, v) => {
+  const n = Number(v);
+  if (v == null || Number.isNaN(n)) return '—';
+  const inr = pred.type !== 'Commodity' && !/-USD$|=F$/.test(pred.asset || '');
+  return (inr ? '₹' : '$') + n.toLocaleString(inr ? 'en-IN' : 'en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
 
 const signalColor = (d) => d === 'BUY' ? '#22c55e' : d === 'SELL' ? '#ef4444' : '#f59e0b';
 
 export default function AIPredictionsView({ queue, setQueue }) {
-  const [predictions, setPredictions] = useState(MOCK_SEEDS);
+  const [predictions, setPredictions] = useState([]);
+  const [scanNote, setScanNote]       = useState('');
   const [filterTab, setFilterTab]     = useState('All');
   const [engine, setEngine]           = useState('astra_ai'); // Default to Aggressive AI for signals
   const [pushingId, setPushingId]     = useState(null);
@@ -50,18 +56,20 @@ export default function AIPredictionsView({ queue, setQueue }) {
     setPushError(null);
 
     const payload = {
-      asset:       pred.asset,
-      type:        pred.type,
-      signal:      pred.direction,
-      targetPrice: pred.target,
-      stopLoss:    pred.stopLoss,
-      confidence:  pred.confidence,
+      asset:        pred.asset,
+      type:         pred.type,
+      signal:       pred.direction,
+      entry_price:  pred.entry,
+      target_price: pred.target,
+      stop_loss:    pred.stopLoss,
+      confidence:   pred.confidence,
+      engine:       pred.engine,
     };
 
     try {
       const res = await fetch(`${API_URL}/api/signals`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body:    JSON.stringify(payload),
       });
       if (!res.ok) throw new Error('Backend rejected the signal');
@@ -73,6 +81,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
           asset:       pred.asset,
           type:        pred.type,
           signal:      pred.direction,
+          entryPrice:  pred.entry,
           targetPrice: pred.target,
           stopLoss:    pred.stopLoss,
           confidence:  pred.confidence,
@@ -93,20 +102,36 @@ export default function AIPredictionsView({ queue, setQueue }) {
   const handleRefresh = async () => {
     setLoading(true);
     setPushError(null);
-    
-    // Simulate a fresh scan with the chosen engine
-    // In a real app, this would call /api/signals/scan?engine=...
-    // For now, we'll just simulate a delay and slightly randomize seeds to show "model switching" effect
-    setTimeout(() => {
-      const fresh = MOCK_SEEDS.map(s => ({
-        ...s,
-        confidence: Math.round(s.confidence + (Math.random() * 10 - 5)),
-        time: 'Just now'
-      })).filter(s => !queue.some(q => q.asset === s.asset));
-      
-      setPredictions(fresh);
+    setScanNote('');
+    try {
+      const [eq, com] = await Promise.all([
+        fetch(`${API_URL}/api/scan/universe?engine=${engine}&top_k=15&min_confidence=0`, { headers: authHeaders() })
+          .then(r => (r.ok ? r.json() : { signals: [] })),
+        fetch(`${API_URL}/api/commodities/scan`, { headers: authHeaders() })
+          .then(r => (r.ok ? r.json() : { signals: [] })).catch(() => ({ signals: [] })),
+      ]);
+      const now = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+      const rows = [
+        ...(eq.signals || []).map(x => ({
+          id: `eq-${x.symbol}`, asset: x.symbol, direction: x.signal, entry: x.entry_price,
+          target: x.target, stopLoss: x.stop_loss, confidence: Math.round(x.confidence),
+          type: x.symbol?.startsWith('^') ? 'F&O' : 'Equity', time: `Scanned ${now}`, engine,
+        })),
+        ...(com.signals || []).filter(x => x.signal && x.signal !== 'HOLD').map(x => ({
+          id: `c-${x.symbol}`, asset: x.symbol, direction: x.signal, entry: x.entry_price,
+          target: x.target, stopLoss: x.stop_loss, confidence: Math.round(x.confidence),
+          type: 'Commodity', time: `Scanned ${now}`, engine: 'commodities',
+        })),
+      ].filter(r => r.direction && r.direction !== 'HOLD')
+       .filter(r => !queue.some(q => q.asset === r.asset))
+       .sort((a, b) => b.confidence - a.confidence);
+      setPredictions(rows);
+      if (!rows.length) setScanNote(`No BUY/SELL setups from ${eq.universe_size || 0} stocks right now. The model is holding, not failing.`);
+    } catch (e) {
+      setPushError(`Scan failed: ${e.message}. Is the backend running?`);
+    } finally {
       setLoading(false);
-    }, 800);
+    }
   };
 
   return (
@@ -172,7 +197,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={8} style={{ padding: '48px', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                  All signals in this category have been pushed to Auto Mode queue.{' '}
+                  {loading ? 'Scanning the market with live data…' : (scanNote || 'No open BUY/SELL signals in this category.')}{' '}
                   <span style={{ color: 'var(--color-primary)', cursor: 'pointer' }} onClick={handleRefresh}>Refresh signals</span>
                 </td>
               </tr>
@@ -187,9 +212,9 @@ export default function AIPredictionsView({ queue, setQueue }) {
                     {pred.direction}
                   </span>
                 </td>
-                <td style={{ padding: '14px 20px' }}>₹{pred.entry.toLocaleString('en-IN')}</td>
-                <td style={{ padding: '14px 20px', color: '#22c55e', fontWeight: 600 }}>₹{pred.target.toLocaleString('en-IN')}</td>
-                <td style={{ padding: '14px 20px', color: '#ef4444', fontWeight: 600 }}>₹{pred.stopLoss.toLocaleString('en-IN')}</td>
+                <td style={{ padding: '14px 20px' }}>{money(pred, pred.entry)}</td>
+                <td style={{ padding: '14px 20px', color: '#22c55e', fontWeight: 600 }}>{money(pred, pred.target)}</td>
+                <td style={{ padding: '14px 20px', color: '#ef4444', fontWeight: 600 }}>{money(pred, pred.stopLoss)}</td>
                 <td style={{ padding: '14px 20px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <div style={{ width: 56, height: 5, background: 'rgba(255,255,255,.1)', borderRadius: 3, overflow: 'hidden' }}>
