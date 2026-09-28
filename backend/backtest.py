@@ -163,7 +163,7 @@ def run_backtest(symbol: str, engine: str, lookback_bars: int = 252,
                     else:
                         pred = float(ai_engine.rf_model.predict(feats)[0])
                         vol  = float(history.iloc[-1].get("Volat_Ratio", 1.0))
-                        thr  = max(1.2, vol * 0.5)
+                        thr  = max(0.5, vol * 0.25)   # lowered from 1.2/0.5 — RF predicts 5d returns, typical range ±0.3–1%
                         sig  = "BUY" if pred > thr else ("SELL" if pred < -thr else "HOLD")
 
             elif engine == "astra_ml":
@@ -178,11 +178,11 @@ def run_backtest(symbol: str, engine: str, lookback_bars: int = 252,
                         X = scaled.reshape(1, 30, len(feat_cols))
                         pred = float(ai_engine.lstm_model.predict(X, verbose=0)[0][0])
                         vol  = float(history.iloc[-1].get("Volat_Ratio", 1.0))
-                        thr  = max(0.8, vol * 0.4)
+                        thr  = max(0.3, vol * 0.2)   # lowered from 0.8/0.4 — BiLSTM predictions compress to ±0.3–0.5%
                         sig  = "BUY" if pred > thr else ("SELL" if pred < -thr else "HOLD")
 
             elif engine == "ensemble":
-                # Quick ensemble: RF + rules (skip LSTM for speed)
+                # Ensemble: Rules + RF + LSTM (2/3 majority vote)
                 sigs = []
                 last = history.iloc[-1]
                 patterns = ai_engine._detect_candlestick_patterns(history)
@@ -195,11 +195,24 @@ def run_backtest(symbol: str, engine: str, lookback_bars: int = 252,
                     if not feats.isnull().any().any():
                         pred = float(ai_engine.rf_model.predict(feats)[0])
                         vol  = float(last.get("Volat_Ratio", 1.0))
-                        thr  = max(1.2, vol * 0.5)
+                        thr  = max(0.5, vol * 0.25)   # aligned with astra_ai threshold
+                        sigs.append("BUY" if pred > thr else ("SELL" if pred < -thr else "HOLD"))
+                if ai_engine.lstm_model is not None:
+                    feat_data = history[feat_cols].tail(30).values
+                    if len(feat_data) >= 30 and not np.isnan(feat_data).any():
+                        scaled = ai_engine.lstm_scaler.transform(feat_data)
+                        X = scaled.reshape(1, 30, len(feat_cols))
+                        pred = float(ai_engine.lstm_model.predict(X, verbose=0)[0][0])
+                        vol  = float(last.get("Volat_Ratio", 1.0))
+                        thr  = max(0.3, vol * 0.2)   # aligned with astra_ml threshold
                         sigs.append("BUY" if pred > thr else ("SELL" if pred < -thr else "HOLD"))
                 from collections import Counter
-                top_sig, top_votes = Counter(sigs).most_common(1)[0]
-                sig = top_sig if top_votes >= 2 else "HOLD"
+                non_hold = [s for s in sigs if s != "HOLD"]
+                if non_hold:
+                    top_sig, top_votes = Counter(non_hold).most_common(1)[0]
+                    sig = top_sig if top_votes >= 2 else "HOLD"
+                else:
+                    sig = "HOLD"
 
             elif engine == "crypto_rules":
                 last = history.iloc[-1]
@@ -264,9 +277,15 @@ def run_backtest(symbol: str, engine: str, lookback_bars: int = 252,
     dd   = ((pd.Series(cap_series) - peak) / peak * 100)
     max_dd = dd.min()
 
-    # Sharpe (daily returns approximation)
-    pnl_series = df_t["pnl_pct"].values / 100
-    sharpe = (pnl_series.mean() / (pnl_series.std() + 1e-9)) * np.sqrt(252) if len(pnl_series) > 1 else 0.0
+    # Sharpe: aggregate to daily P&L (one slot per bar in the test window),
+    # then annualise. Using per-trade series inflates Sharpe when trade count is low.
+    daily_pnl = np.zeros(lookback_bars)
+    for t in trades:
+        eb = t.get("exit_bar")
+        if eb is not None and 0 <= eb < lookback_bars:
+            daily_pnl[eb] += t["pnl_pct"] / 100
+    daily_std = daily_pnl.std()
+    sharpe = float(daily_pnl.mean() / (daily_std + 1e-9) * np.sqrt(252)) if daily_std > 0 else 0.0
 
     return {
         "symbol":          symbol,

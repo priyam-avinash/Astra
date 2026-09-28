@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { TrendingUp, TrendingDown, Activity, DollarSign, Wallet, RefreshCw, ChevronDown, ChevronUp, Brain } from 'lucide-react';
 
-const API = 'http://localhost:8000';
+import { API_URL } from './config';
+
+const API = API_URL;
 const fmt = (n) => `₹${Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 const fmtPct = (n) => `${n >= 0 ? '+' : ''}${Number(n || 0).toFixed(2)}%`;
 

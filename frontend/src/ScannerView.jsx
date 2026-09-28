@@ -1,4 +1,6 @@
 import React, { useState, useCallback } from 'react';
+import { API_URL } from './config';
+
 import { Search, RefreshCw, Telescope, TrendingUp, TrendingDown,
          CheckCircle, AlertCircle, Filter, ChevronDown } from 'lucide-react';
 
@@ -39,7 +41,7 @@ export default function ScannerView() {
     setResults([]);
     setApproved(new Set());
     try {
-      let url = `http://localhost:8000/api/scan/universe?engine=${engine}&top_k=${topK}&min_confidence=${minConf}`;
+      let url = `${API_URL}/api/scan/universe?engine=${engine}&top_k=${topK}&min_confidence=${minConf}`;
       if (signal)  url += `&signal_filter=${signal}`;
       if (sector)  url += `&sector=${encodeURIComponent(sector)}`;
       const res = await fetch(url);
@@ -55,7 +57,7 @@ export default function ScannerView() {
 
   const approveSignal = useCallback(async (sig) => {
     try {
-      const res = await fetch('http://localhost:8000/api/signals', {
+      const res = await fetch(`${API_URL}/api/signals`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

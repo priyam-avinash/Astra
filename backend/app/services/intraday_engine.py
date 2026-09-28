@@ -148,6 +148,23 @@ def _fetch_intraday_extended(symbol: str, days: int = 30) -> pd.DataFrame:
     except Exception as e:
         logger.debug(f"[backtest] Yahoo 15m fetch failed for {clean}: {e}")
 
+    # Upstox v2 — free with account, up to 1 month of real 15m bars (1min resampled)
+    # Requires daily token refresh via /upstox/login after first setup.
+    if df.empty:
+        try:
+            from app.services.upstox_data import upstox_service
+            if upstox_service.is_available():
+                period_str = "1mo" if days <= 30 else ("3mo" if days <= 90 else "6mo")
+                up_df = upstox_service.get_ohlcv(clean, period=period_str, interval="15m")
+                if up_df is not None and not up_df.empty:
+                    up_df = up_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+                    up_df = up_df[up_df["Volume"] > 0]
+                    if not up_df.empty:
+                        logger.info(f"[backtest] Upstox 15m: {len(up_df)} bars for {clean}")
+                        df = up_df
+        except Exception as e:
+            logger.debug(f"[backtest] Upstox fetch failed for {clean}: {e}")
+
     # Twelve Data — free tier supports 1h intraday for some Indian stocks
     # Format: RELIANCE:NSE  (colon separator, no .NS suffix)
     if df.empty:

@@ -1,0 +1,27 @@
+# Node / build artifacts
+node_modules/
+dist/
+build/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.development
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Tests / coverage
+coverage/
+.nyc_output/

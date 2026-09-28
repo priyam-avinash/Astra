@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Zap, RefreshCw } from 'lucide-react';
 
+import { API_URL } from './config';
+
 /**
  * AI Predictions View
  * 
@@ -57,7 +59,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
     };
 
     try {
-      const res = await fetch('http://localhost:8000/api/signals', {
+      const res = await fetch(`${API_URL}/api/signals`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(payload),

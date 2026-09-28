@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
 import { User, Mail, Lock, ArrowRight, Loader, CheckCircle } from 'lucide-react';
 
+import { register } from './auth';
+
 export default function RegisterView({ onRegister, onSwitchToLogin }) {
-  const [formData, setFormData] = useState({ 
-    username: '', 
-    email: '', 
-    password: '', 
-    confirmPassword: '' 
+  const [formData, setFormData] = useState({
+    username: '',
+    email: '',
+    password: '',
+    confirmPassword: ''
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -18,30 +20,14 @@ export default function RegisterView({ onRegister, onSwitchToLogin }) {
       setError('Passwords do not match');
       return;
     }
-    
     setLoading(true);
     setError('');
-
     try {
-      const response = await fetch('http://localhost:8000/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: formData.username,
-          email: formData.email,
-          password: formData.password
-        })
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.detail || 'Registration failed');
-      }
-
+      await register(formData.username, formData.password);
       setSuccess(true);
       setTimeout(() => onSwitchToLogin(), 2000);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Registration failed');
     } finally {
       setLoading(false);
     }

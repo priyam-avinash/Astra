@@ -12,6 +12,7 @@ without raising exceptions.
 import logging
 import os
 from datetime import datetime, timedelta
+from typing import Optional
 
 import pandas as pd
 
@@ -123,16 +124,28 @@ class DhanDataService:
 
     # ─────────────────────── Public API ─────────────────────────────────────
 
-    def is_available(self) -> bool:
+    def is_available(self, token: Optional[str] = None) -> bool:
         """Return True only if credentials are set and not placeholder values."""
         cid = os.getenv("DHAN_CLIENT_ID", "")
-        tok = os.getenv("DHAN_ACCESS_TOKEN", "")
+        tok = token if token else os.getenv("DHAN_ACCESS_TOKEN", "")
         return (
             bool(cid)
             and bool(tok)
             and cid.strip() not in _PLACEHOLDER_TOKENS
             and tok.strip() not in _PLACEHOLDER_TOKENS
         )
+
+    def _make_client(self, token: str):
+        """Create a one-shot dhanhq client with a specific access token."""
+        cid = os.getenv("DHAN_CLIENT_ID", "")
+        if not cid or cid.strip() in _PLACEHOLDER_TOKENS:
+            return None
+        try:
+            from dhanhq import dhanhq  # type: ignore
+            return dhanhq(cid, token)
+        except Exception as e:
+            logger.debug(f"Dhan temp client init failed: {e}")
+            return None
 
     def resolve(self, symbol: str) -> tuple:
         """
@@ -146,7 +159,8 @@ class DhanDataService:
             return sec_id, "NSE_EQ"
         return None, ""
 
-    def get_ohlcv(self, symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
+    def get_ohlcv(self, symbol: str, period: str = "6mo", interval: str = "1d",
+                  token: Optional[str] = None) -> pd.DataFrame:
         """
         Fetch OHLCV data for the given symbol.
 
@@ -162,13 +176,15 @@ class DhanDataService:
             "15m" → 15-min intraday
             "5m"  → 5-min intraday
             "1m"  → 1-min intraday
+        token : str, optional
+            Per-user access token; falls back to env DHAN_ACCESS_TOKEN if None.
 
         Returns
         -------
         pd.DataFrame with DatetimeIndex and columns [Open, High, Low, Close, Volume],
         or empty DataFrame on failure.
         """
-        if not self.is_available():
+        if not self.is_available(token=token):
             return pd.DataFrame()
 
         sec_id, exchange_segment = self.resolve(symbol)
@@ -176,7 +192,7 @@ class DhanDataService:
             logger.debug(f"Dhan: symbol '{symbol}' not found in scrip master")
             return pd.DataFrame()
 
-        client = self._get_client()
+        client = self._make_client(token) if token else self._get_client()
         if client is None:
             return pd.DataFrame()
 
@@ -217,19 +233,19 @@ class DhanDataService:
             logger.debug(f"Dhan get_ohlcv failed for {symbol}: {e}")
             return pd.DataFrame()
 
-    def get_quote(self, symbol: str) -> float:
+    def get_quote(self, symbol: str, token: Optional[str] = None) -> float:
         """
         Fetch real-time last traded price for a symbol using quote_data.
         Returns 0.0 if unavailable.
         """
-        if not self.is_available():
+        if not self.is_available(token=token):
             return 0.0
 
         sec_id, exchange_segment = self.resolve(symbol)
         if sec_id is None:
             return 0.0
 
-        client = self._get_client()
+        client = self._make_client(token) if token else self._get_client()
         if client is None:
             return 0.0
 

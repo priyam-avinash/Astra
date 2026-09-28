@@ -1,0 +1,3 @@
+entry_bar,exit_bar,bars_held,direction,entry_price,exit_price,exit_reason,pnl_pct,pnl_cash,capital
+32.0,47.0,15.0,SELL,1254.1726,1303.9214,SL,-3.997,-399.67,99600.33
+,,,BUY,,,EOD,-4.198,-418.17,99182.17

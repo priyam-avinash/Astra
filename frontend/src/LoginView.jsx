@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Lock, Mail, ArrowRight, Loader } from 'lucide-react';
 
+import { login } from './auth';
+
 export default function LoginView({ onLogin, onSwitchToRegister }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -11,21 +13,11 @@ export default function LoginView({ onLogin, onSwitchToRegister }) {
     e.preventDefault();
     setLoading(true);
     setError('');
-
     try {
-      const response = await fetch('http://localhost:8000/api/auth/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ username: email, password: password })
-      });
-
-      if (!response.ok) throw new Error('Invalid email or password');
-
-      const data = await response.json();
-      localStorage.setItem('astra_token', data.access_token);
+      const data = await login(email, password);
       onLogin(data.access_token);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Invalid email or password');
     } finally {
       setLoading(false);
     }

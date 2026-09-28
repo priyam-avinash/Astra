@@ -5,6 +5,8 @@ import { createChart, ColorType, CrosshairMode, LineStyle } from 'lightweight-ch
 import FullChartModal from './FullChartModal.jsx';
 import AgentPanel from './components/AgentPanel.jsx';
 
+import { API_URL } from './config';
+
 /* ── STYLES ── */
 const S = {
   page: { height: '100%', width: '100%', display: 'flex', flexDirection: 'column', paddingTop: 64, paddingLeft: 24, paddingRight: 24, paddingBottom: 32, background: '#0f1118', color: '#e1e4ea', fontFamily: "'Inter', -apple-system, sans-serif", overflowY: 'auto', boxSizing: 'border-box' },
@@ -333,7 +335,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
     try {
       const token = localStorage.getItem('astra_token');
       const h = token ? { Authorization: `Bearer ${token}` } : {};
-      const res = await fetch(`http://localhost:8000/api/agent/memories/${sym || symbol}`, { headers: h });
+      const res = await fetch(`${API_URL}/api/agent/memories/${sym || symbol}`, { headers: h });
       if (res.ok) { const d = await res.json(); setLessons(d.memories || []); }
     } catch (_) {}
   }, [symbol]);
@@ -345,7 +347,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
     try {
       const token = localStorage.getItem('astra_token');
       const h = { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
-      const res = await fetch(`http://localhost:8000/api/analyze/${symbol}/enrich`, {
+      const res = await fetch(`${API_URL}/api/analyze/${symbol}/enrich`, {
         method: 'POST',
         headers: h,
         body: JSON.stringify({
@@ -404,7 +406,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
         // Route to crypto endpoint
         const cryptoEngine = eng.startsWith('astra_crypto') ? eng : 'astra_crypto';
         const res = await fetch(
-          `http://localhost:8000/api/crypto/analyze/${sym}?market=${mkt}&engine=${cryptoEngine}`,
+          `${API_URL}/api/crypto/analyze/${sym}?market=${mkt}&engine=${cryptoEngine}`,
           { headers, signal }
         );
         if (!res.ok) throw new Error(`Server returned ${res.status}`);
@@ -414,8 +416,8 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
       } else {
         // Route to equity endpoint
         const [resA, resF] = await Promise.all([
-          fetch(`http://localhost:8000/api/analyze/${sym}?engine=${eng}`, { headers, signal }),
-          fetch(`http://localhost:8000/api/financials/${sym}`, { headers, signal }),
+          fetch(`${API_URL}/api/analyze/${sym}?engine=${eng}`, { headers, signal }),
+          fetch(`${API_URL}/api/financials/${sym}`, { headers, signal }),
         ]);
         if (!resA.ok) throw new Error(`Server returned ${resA.status}`);
         const json = await resA.json();
@@ -439,9 +441,9 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
       const isC = isCrypto(symbol);
       let res;
       if (isC) {
-        res = await fetch(`http://localhost:8000/api/crypto/analyze/${symbol}?market=${cryptoMarket}&timeframe=${interval}`, { headers });
+        res = await fetch(`${API_URL}/api/crypto/analyze/${symbol}?market=${cryptoMarket}&timeframe=${interval}`, { headers });
       } else {
-        res = await fetch(`http://localhost:8000/api/analyze/${symbol}?engine=${engine}&interval=${interval}&period=${period}`, { headers });
+        res = await fetch(`${API_URL}/api/analyze/${symbol}?engine=${engine}&interval=${interval}&period=${period}`, { headers });
       }
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const json = await res.json();

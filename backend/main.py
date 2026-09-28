@@ -5,6 +5,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.endpoints import router as api_router
 from app.api.websockets import router as ws_router
+from app.api.upstox_router import router as upstox_router
+from app.api.strategies_router import router as strategies_router
+from app.api.brokers_router import router as brokers_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,16 +68,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS — allowed origins driven by FRONTEND_ORIGINS env (comma-separated).
+# Defaults to localhost dev origins; production must set this explicitly.
+import os as _os
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173"
+_origins = [o.strip() for o in _os.getenv("FRONTEND_ORIGINS", _default_origins).split(",") if o.strip()]
+# Security note: when allow_credentials=True, CORS spec FORBIDS allow_origins="*".
+# We intentionally use an explicit allowlist instead.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logger.info(f"CORS allowed origins: {_origins}")
 
 app.include_router(api_router)
 app.include_router(ws_router)
+app.include_router(upstox_router)
+app.include_router(strategies_router)
+app.include_router(brokers_router)
 
 
 @app.get("/")
@@ -85,3 +99,8 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")

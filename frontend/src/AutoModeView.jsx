@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { API_URL } from './config';
+
 import {
   Check, X, AlertCircle, Zap, Settings2, ChevronDown, ChevronUp,
   IndianRupee, Shield, TrendingUp, TrendingDown, Info, Lock
@@ -121,7 +123,7 @@ export default function AutoModeView({ queue, setQueue, history, setHistory }) {
       setHistory(prev => [optimisticEntry, ...prev]);
 
       try {
-        const res = await fetch('http://localhost:8000/api/execute', {
+        const res = await fetch(`${API_URL}/api/execute`, {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

@@ -47,14 +47,75 @@ MAX_DAILY_LOSS  = float(os.getenv("MAX_DAILY_LOSS", "10000"))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/token", auto_error=False)
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    # --- AUTH BYPASS (intentional for paper-trading phase) ---
-    admin_user = db.query(User).filter(User.username == "admin_bypass").first()
-    if not admin_user:
-        admin_user = User(username="admin_bypass", hashed_password="bypass_hash")
-        db.add(admin_user)
-        db.commit()
-    return admin_user
+# AUTH_MODE controls authentication enforcement:
+#   "jwt"    (default, production)  — require valid JWT for every protected endpoint
+#   "bypass" (dev only)             — inject admin_bypass user, skip JWT validation
+# Setting bypass in production-like env (paper_trading=false) raises at startup.
+_AUTH_MODE        = os.getenv("AUTH_MODE", "jwt").lower()
+_PAPER_TRADING_ENV = os.getenv("PAPER_TRADING", "true").lower() != "false"
+if _AUTH_MODE == "bypass":
+    # Defense in depth: read PAPER_TRADING env directly. Don't trust the in-process
+    # PAPER_MODE constant (which is hardcoded True for the broker safety lock).
+    if not _PAPER_TRADING_ENV:
+        raise RuntimeError(
+            "REFUSING TO START: AUTH_MODE=bypass requires PAPER_TRADING=true in env. "
+            "Bypass mode in live execution is a critical security misconfiguration."
+        )
+    logger.warning(
+        "⚠  AUTH_MODE=bypass — all requests authenticated as 'admin_bypass'. "
+        "Switch to AUTH_MODE=jwt before any external user touches this server."
+    )
+
+
+def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
+                     db: Session = Depends(get_db)) -> User:
+    """
+    Resolve the current user from JWT. Raises 401 on missing/invalid token.
+    Returns admin_bypass user if AUTH_MODE=bypass (dev only).
+    Also publishes the user id into the request-scoped user_context, so
+    broker plugins downstream can resolve per-user credentials.
+    """
+    from app.services.user_context import set_current_user_id
+
+    if _AUTH_MODE == "bypass":
+        admin_user = db.query(User).filter(User.username == "admin_bypass").first()
+        if not admin_user:
+            admin_user = User(username="admin_bypass", hashed_password="bypass_hash")
+            db.add(admin_user)
+            db.commit()
+            db.refresh(admin_user)
+        set_current_user_id(admin_user.id)
+        return admin_user
+
+    # Real JWT path
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        payload  = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise JWTError("Token has no 'sub' claim")
+    except JWTError as e:
+        logger.info(f"JWT validation failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User no longer exists",
+        )
+    set_current_user_id(user.id)
+    return user
 
 # ── Kill Switch endpoints (defined AFTER get_current_user) ───────────────────
 @router.get("/api/emergency/status")

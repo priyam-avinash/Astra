@@ -1,0 +1,39 @@
+# Local Python / IDE artifacts
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local databases (must NEVER ship in image)
+*.db
+*.db-journal
+astra_trading.db
+test_astra.db
+
+# Local secrets (defense in depth — should already be gitignored)
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs and dev outputs
+*.log
+backtest_results/
+upstox_instruments.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Daily run scripts (host-only)
+daily_start.command
+daily_stop.command

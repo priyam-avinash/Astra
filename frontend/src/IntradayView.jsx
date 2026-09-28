@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { API_URL } from './config';
+
 import {
   Timer, TrendingUp, TrendingDown, Minus, RefreshCw,
   Activity, BarChart2, Zap, AlertTriangle, CheckCircle,
@@ -6,7 +8,7 @@ import {
   ChevronDown, ChevronUp, Play, Search
 } from 'lucide-react';
 
-const API = 'http://localhost:8000';
+const API = API_URL;
 
 const QUICK_SYMBOLS = [
   'RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK',

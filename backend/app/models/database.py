@@ -124,6 +124,28 @@ class AgentMemory(Base):
     created_at      = Column(DateTime, default=datetime.utcnow)
 
 
+class BrokerCredential(Base):
+    """
+    Per-user broker credentials, encrypted at rest with Fernet (app.services.crypto).
+    One row per (user_id, broker) pair — UNIQUE constraint enforces this.
+    Tokens are SEBI-mandated to expire daily; UI shows expires_at to prompt re-login.
+    """
+    __tablename__ = "broker_credentials"
+
+    id          = Column(Integer,  primary_key=True, index=True)
+    user_id     = Column(Integer,  ForeignKey("users.id"), nullable=False, index=True)
+    broker      = Column(String,   nullable=False)  # "Upstox" | "Dhan" | "Zerodha" | ...
+    # All sensitive strings stored as Fernet ciphertext via app.services.crypto.encrypt/decrypt
+    access_token_enc   = Column(Text, nullable=True)
+    refresh_token_enc  = Column(Text, nullable=True)
+    client_id_enc      = Column(Text, nullable=True)
+    api_key_enc        = Column(Text, nullable=True)
+    api_secret_enc     = Column(Text, nullable=True)
+    expires_at         = Column(DateTime, nullable=True)
+    created_at         = Column(DateTime, default=datetime.utcnow)
+    updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 Base.metadata.create_all(bind=engine)
 
 # ── SQLite column-migration helper (dev only) ─────────────────────────

@@ -4,9 +4,8 @@ ASTRA Paper Trading Engine
 Simulates order execution using REAL market prices fetched via the AI engine.
 No real money is ever touched. All fills use live LTP with realistic 0.05% slippage.
 
-Switch to live Dhan execution by setting PAPER_TRADING=false in .env and providing
-valid DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN. The Dhan security-ID lookup table must
-also be populated before live orders will succeed.
+PAPER_MODE is permanently True — live order execution is intentionally disabled.
+DhanLiveBroker.execute_trade raises a hard error on every call regardless of config.
 """
 
 import logging
@@ -19,7 +18,8 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-PAPER_MODE = os.getenv("PAPER_TRADING", "true").lower() != "false"
+# Hard-coded True — never reads from env. Live trading intentionally blocked.
+PAPER_MODE = True
 
 
 # ── Paper Trading Engine ───────────────────────────────────────────────────
@@ -161,35 +161,18 @@ class DhanLiveBroker:
         return 0.0  # Would use Dhan quote API in production
 
     def execute_trade(self, asset: str, action: str, quantity: int, price: float) -> dict:
-        if not self.live:
-            raise RuntimeError("Dhan credentials not configured")
-        sec_id = self.SECURITY_ID_MAP.get(asset)
-        if not sec_id:
-            raise ValueError(
-                f"No Dhan security_id for {asset}. "
-                "Add it to SECURITY_ID_MAP or populate from the scrip master CSV."
-            )
-        from dhanhq import dhanhq
-        direction_flag = self.dhan.BUY if action.upper() == "BUY" else self.dhan.SELL
-        response = self.dhan.place_order(
-            security_id=sec_id,
-            exchange_segment=self.dhan.NSE,
-            transaction_type=direction_flag,
-            quantity=quantity,
-            order_type=self.dhan.MARKET,
-            product_type=self.dhan.CNC,   # CNC = delivery (not intraday)
-            price=0,
+        # Hard block — live order execution is permanently disabled in ASTRA.
+        # This guard fires regardless of credentials, env vars, or self.live state.
+        raise RuntimeError(
+            "LIVE ORDER BLOCKED: ASTRA is in permanent paper-trading mode. "
+            "Real order execution via Dhan is disabled. "
+            "All trades are simulated — no real money is ever placed."
         )
-        if response.get("status") == "success":
-            order_id = response.get("data", {}).get("orderId", "DHAN-UNKNOWN")
-            return {"status": "success", "order_id": order_id, "asset": asset,
-                    "action": action.upper(), "executed_price": price, "mode": "LIVE"}
-        raise Exception(response.get("remarks", "Dhan order rejected"))
 
     def get_status(self) -> dict:
         return {"mode": "LIVE", "paper_trading": False}
 
 
-# ── Module singleton ───────────────────────────────────────────────────────
-broker_service = PaperTradingEngine() if PAPER_MODE else DhanLiveBroker()
-logger.info(f"Broker mode: {'📝 PAPER TRADING' if PAPER_MODE else '🔴 LIVE TRADING'}")
+# ── Module singleton — always paper, unconditionally ─────────────────────
+broker_service = PaperTradingEngine()
+logger.info("Broker mode: PAPER TRADING (permanent — live execution blocked)")

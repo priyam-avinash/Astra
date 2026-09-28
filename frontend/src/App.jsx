@@ -5,7 +5,7 @@ import {
   Menu, X, Bell, User, LogOut, Activity, LayoutDashboard,
   DollarSign, Bitcoin, Telescope, TrendingUp, TrendingDown,
   Package, ChevronRight, Search, RefreshCw, AlertCircle,
-  ArrowUpRight, ArrowDownRight, Minus, Timer
+  ArrowUpRight, ArrowDownRight, Minus, Timer, Layers
 } from 'lucide-react';
 import AIPredictionsView  from './AIPredictionsView';
 import AutoModeView       from './AutoModeView';
@@ -18,6 +18,12 @@ import SettingsView       from './SettingsView';
 import ScannerView        from './ScannerView';
 import CryptoView         from './CryptoView';
 import IntradayView       from './IntradayView';
+import StrategiesView     from './StrategiesView';
+import LoginView          from './LoginView';
+import RegisterView       from './RegisterView';
+
+import { API_URL } from './config';
+import { isAuthenticated, logout as authLogout } from './auth';
 
 // ── Helpers ────────────────────────────────────────────────────────
 function isMarketOpen() {
@@ -57,6 +63,7 @@ const NAV_GROUPS = [
   {
     label: 'AI Engine',
     items: [
+      { id: 'Strategies',   name: 'Strategies',    icon: <Layers         size={16} /> },
       { id: 'AI Predictions',name: 'AI Predictions',icon: <Brain         size={16} /> },
       { id: 'Auto Mode',    name: 'Auto Mode',     icon: <Zap            size={16} /> },
     ]
@@ -80,7 +87,9 @@ const NAV_GROUPS = [
 
 // ── Main App ──────────────────────────────────────────────────────
 export default function App() {
+  // Auth bypassed for dev — always logged in. Re-enable with isAuthenticated() when ready.
   const [isLoggedIn, setIsLoggedIn]     = useState(true);
+  const [authScreen, setAuthScreen]     = useState('login');   // 'login' | 'register'
   const [activeTab, setActiveTab]       = useState('Dashboard');
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const [positions, setPositions]       = useState([]);
@@ -106,6 +115,17 @@ export default function App() {
   // Live price WebSocket
   const { isLive } = useLivePrices();
 
+  // Auth state sync — listen for explicit changes and storage events (other tabs)
+  useEffect(() => {
+    const sync = () => setIsLoggedIn(isAuthenticated());
+    window.addEventListener('astra:auth-changed', sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener('astra:auth-changed', sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+
   // Market open timer
   useEffect(() => {
     const t = setInterval(() => setMarketOpen(isMarketOpen()), 60_000);
@@ -114,7 +134,7 @@ export default function App() {
 
   // Fetch initial halt status on mount
   useEffect(() => {
-    fetch('http://localhost:8000/api/emergency/status')
+    fetch(`${API_URL}/api/emergency/status`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d) setHalted(d.halted); })
       .catch(() => {});
@@ -122,7 +142,7 @@ export default function App() {
 
   // Read LLM enabled state on mount
   useEffect(() => {
-    fetch('http://localhost:8000/api/settings')
+    fetch(`${API_URL}/api/settings`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d?.settings?.llm_enabled) setLlmGlobalOn(d.settings.llm_enabled === 'true'); })
       .catch(() => {});
@@ -132,7 +152,7 @@ export default function App() {
     const next = !llmGlobalOn;
     setLlmGlobalOn(next);
     try {
-      await fetch('http://localhost:8000/api/settings', {
+      await fetch(`${API_URL}/api/settings`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings: { llm_enabled: String(next) } }),
@@ -143,7 +163,7 @@ export default function App() {
   const toggleHalt = async () => {
     const endpoint = halted ? '/api/emergency/resume' : '/api/emergency/halt';
     try {
-      const res = await fetch(`http://localhost:8000${endpoint}`, { method: 'POST' });
+      const res = await fetch(`${API_URL}${endpoint}`, { method: 'POST' });
       if (res.ok) { const d = await res.json(); setHalted(d.halted); }
     } catch (_) {}
   };
@@ -152,15 +172,15 @@ export default function App() {
   useEffect(() => {
     const fetchPositions = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/positions');
+        const res = await fetch(`${API_URL}/api/positions`);
         if (res.ok) { const d = await res.json(); setPositions(d.positions || []); }
       } catch (_) {}
     };
     const fetchOther = async () => {
       try {
         const [hRes, qRes] = await Promise.all([
-          fetch('http://localhost:8000/api/history'),
-          fetch('http://localhost:8000/api/signals'),
+          fetch(`${API_URL}/api/history`),
+          fetch(`${API_URL}/api/signals`),
         ]);
         if (hRes.ok) { const d = await hRes.json(); setHistory(d.history || []); }
         if (qRes.ok) { const d = await qRes.json(); setQueue(d.queue || []); }
@@ -172,7 +192,7 @@ export default function App() {
     return () => { clearInterval(p); clearInterval(o); };
   }, []);
 
-  const handleLogout = () => { localStorage.removeItem('token'); setIsLoggedIn(false); };
+  const handleLogout = () => { authLogout(); setIsLoggedIn(false); };
 
   // Quick scan
   const runQuickScan = useCallback(async () => {
@@ -180,7 +200,7 @@ export default function App() {
     setScanLoading(true);
     setScanResults([]);
     try {
-      const res = await fetch('http://localhost:8000/api/scan/universe?engine=astra_ai&top_k=12&min_confidence=58');
+      const res = await fetch(`${API_URL}/api/scan/universe?engine=astra_ai&top_k=12&min_confidence=58`);
       if (res.ok) { const d = await res.json(); setScanResults(d.signals || []); }
     } catch (_) { setScanResults([]); }
     setScanLoading(false);
@@ -204,6 +224,8 @@ export default function App() {
         return <ScannerView />;
       case 'Intraday':
         return <IntradayView />;
+      case 'Strategies':
+        return <StrategiesView />;
       case 'Commodities':
         return <ComingSoon title="Commodities" subtitle="Gold · Silver · Crude · Natural Gas · Copper" icon={<Package size={32} />} />;
       case 'AI Predictions':
@@ -231,6 +253,25 @@ export default function App() {
         />;
     }
   };
+
+  // ── Auth gate ─────────────────────────────────────────────────
+  // If no valid JWT in storage, show login/register instead of the app.
+  if (!isLoggedIn) {
+    if (authScreen === 'register') {
+      return (
+        <RegisterView
+          onRegister={() => setAuthScreen('login')}
+          onSwitchToLogin={() => setAuthScreen('login')}
+        />
+      );
+    }
+    return (
+      <LoginView
+        onLogin={() => setIsLoggedIn(true)}
+        onSwitchToRegister={() => setAuthScreen('register')}
+      />
+    );
+  }
 
   return (
     <div className="app-container">

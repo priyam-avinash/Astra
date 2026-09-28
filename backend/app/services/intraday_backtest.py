@@ -39,7 +39,19 @@ _IST = pytz.timezone("Asia/Kolkata")
 
 # Assume a fixed notional trade size for P&L calculation
 TRADE_NOTIONAL  = 100_000  # ₹1 lakh per trade
-SLIPPAGE_PCT    = 0.001    # 0.1% per side (realistic NSE intraday slippage)
+SLIPPAGE_PCT    = 0.001    # 0.1% per side (NSE liquid stock intraday slippage)
+
+# Realistic NSE intraday transaction costs (round-trip, deducted at exit):
+#   Brokerage (Zerodha intraday):    ~0.04% (₹40 on ₹1L round-trip; flat ₹20/leg cap)
+#   STT (sell side, intraday equity): 0.025%
+#   Exchange transaction charges:    ~0.007% round-trip
+#   SEBI + stamp duty:               ~0.005% round-trip
+#   GST (18% on brokerage + exch):   ~0.009% round-trip
+#                                    ─────────
+#   TOTAL FIXED COSTS:                0.086% round-trip
+# Plus 0.2% round-trip from SLIPPAGE_PCT (applied separately at fill).
+# Net realistic round-trip cost: ~0.29% on ₹1L intraday positions.
+TRANSACTION_COST_PCT = 0.00086   # 0.086% round-trip, applied to pnl_pct at exit
 
 
 # ── Per-trade simulation ──────────────────────────────────────────────────────
@@ -130,14 +142,17 @@ def _simulate_trade(signal: str, entry_price: float, sl: float, tp: float,
 
 
 def _trade_result(outcome: str, exit_price: float, pnl_pct: float, bars_held: int) -> dict:
-    shares   = int(TRADE_NOTIONAL / max(exit_price, 1))
-    pnl_rs   = round(pnl_pct * TRADE_NOTIONAL, 2)
+    # Deduct realistic round-trip transaction costs (brokerage + STT + exchange + GST + stamp).
+    # SLIPPAGE_PCT is already baked into the entry/exit fill prices upstream.
+    net_pnl_pct = pnl_pct - TRANSACTION_COST_PCT
+    pnl_rs      = round(net_pnl_pct * TRADE_NOTIONAL, 2)
     return {
         "outcome":    outcome,
         "exit_price": round(exit_price, 2),
-        "pnl_pct":    round(pnl_pct * 100, 3),   # in %
+        "pnl_pct":    round(net_pnl_pct * 100, 3),   # in %, net of costs
         "pnl_rs":     pnl_rs,
         "bars_held":  bars_held,
+        "gross_pnl_pct": round(pnl_pct * 100, 3),    # pre-cost gross %, for inspection
     }
 
 
@@ -457,4 +472,96 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
             "Slippage: 0.1% per side. ORB volume filter: 1.1× avg. "
             "Sharpe: daily-aggregated returns. Auto square-off 15:15 IST."
         ),
+    }
+
+
+# ─── Universe-driven backtest (Task 3 — dynamic stock selection + Layer-1) ───
+
+def run_universe_backtest(days: int = 30, top_n_per_strategy: int = 15,
+                          use_weights: bool = True) -> dict:
+    """
+    Universe-driven backtest:
+      1. Rank universe → top-N stocks per strategy
+      2. For each strategy, backtest only its top-N stocks
+      3. Apply signal_weights filter (skip combos with weight < 0.3)
+      4. Update signal_weights after every closed trade
+      5. Return aggregate stats per strategy + per-symbol breakdown
+
+    `use_weights=False` disables the Layer-1 filter (useful for clean baseline).
+    """
+    from app.services.intraday_universe import rank_universe
+    from app.services.signal_weights import signal_weights
+
+    logger.info(f"[universe-backtest] days={days} top_n={top_n_per_strategy} weights={use_weights}")
+    ranked = rank_universe(top_n=top_n_per_strategy)
+
+    strategy_universes = {
+        "ORB":       ranked.get("ORB",       []),
+        "EMA_Cross": ranked.get("EMA_Cross", []),
+        "Momentum":  ranked.get("Momentum",  []),
+    }
+
+    per_strategy_trades: dict = {s: [] for s in strategy_universes}
+    per_symbol_results: dict  = {}
+    skipped_by_weight = 0
+
+    # Build a deduplicated set of symbols to backtest (avoid running same stock 3x)
+    all_symbols: set = set()
+    for syms in strategy_universes.values():
+        all_symbols.update(syms)
+
+    backtest_cache: dict = {}
+    for sym in all_symbols:
+        backtest_cache[sym] = run_intraday_backtest(sym, days=days)
+
+    for strategy, symbols in strategy_universes.items():
+        logger.info(f"[universe-backtest] {strategy}: {len(symbols)} symbols")
+        for sym in symbols:
+            if use_weights and signal_weights.weight(strategy, sym) < 0.3:
+                skipped_by_weight += 1
+                continue
+
+            res = backtest_cache.get(sym, {})
+            if "error" in res or not res:
+                continue
+            stats = res["strategies"].get(strategy, {})
+            trade_log = [t for t in res["trade_log"] if t["strategy"] == strategy]
+
+            per_symbol_results.setdefault(sym, {})[strategy] = {
+                "trades":     stats.get("trades", 0),
+                "win_rate":   stats.get("win_rate_pct", 0),
+                "pnl_rs":     stats.get("total_pnl_rs", 0),
+            }
+
+            for t in trade_log:
+                per_strategy_trades[strategy].append({**t, "symbol": sym})
+                # Always learn — even when filter is disabled we populate weights
+                # so the next run with weights ON has data to filter against.
+                signal_weights.update(strategy, sym, t["pnl_rs"])
+
+    aggregate: dict = {}
+    for strat, trades in per_strategy_trades.items():
+        if not trades:
+            aggregate[strat] = {"trades": 0, "win_rate_pct": 0, "total_pnl_rs": 0}
+            continue
+        wins = [t for t in trades if t["pnl_rs"] > 0]
+        aggregate[strat] = {
+            "trades":         len(trades),
+            "wins":           len(wins),
+            "losses":         len(trades) - len(wins),
+            "win_rate_pct":   round(len(wins) / len(trades) * 100, 1),
+            "total_pnl_rs":   round(sum(t["pnl_rs"] for t in trades), 2),
+            "avg_pnl_rs":     round(sum(t["pnl_rs"] for t in trades) / len(trades), 2),
+            "symbols_traded": len({t["symbol"] for t in trades}),
+        }
+
+    return {
+        "period_days":         days,
+        "top_n_per_strategy":  top_n_per_strategy,
+        "use_weights":         use_weights,
+        "skipped_by_weight":   skipped_by_weight,
+        "universe_used":       strategy_universes,
+        "aggregate":           aggregate,
+        "per_symbol":          per_symbol_results,
+        "generated_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }

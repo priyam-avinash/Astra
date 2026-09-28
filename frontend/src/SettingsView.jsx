@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { API_URL } from './config';
+
 import {
   Settings, Eye, EyeOff, Save, RefreshCw, CheckCircle, XCircle,
   AlertTriangle, Brain, Zap, ChevronDown, ChevronUp, Info
 } from 'lucide-react';
+import BrokersPanel from './BrokersPanel';
 
-const API = 'http://localhost:8000';
+const API = API_URL;
 
 const S = {
   page:      { height: '100%', width: '100%', display: 'flex', flexDirection: 'column', paddingTop: 64, paddingLeft: 24, paddingRight: 24, paddingBottom: 32, background: '#0f1118', color: '#e1e4ea', fontFamily: "'Inter', -apple-system, sans-serif", overflowY: 'auto', boxSizing: 'border-box' },
@@ -322,6 +325,9 @@ export default function SettingsView() {
             </FieldRow>
           )}
         </SectionCard>
+
+        {/* ── Broker Connections ───────────────────────── */}
+        <BrokersPanel />
 
         {/* ── Save ─────────────────────────────────────── */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>

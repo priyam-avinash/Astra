@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Send, Activity, DollarSign, List, BarChart2, Clock } from 'lucide-react';
 
+import { API_URL } from './config';
+
 const mockDepth = () => ({
   bids: Array.from({length: 5}, (_, i) => ({ price: 2950 - i*2, qty: Math.floor(Math.random()*500) + 100 })),
   asks: Array.from({length: 5}, (_, i) => ({ price: 2955 + i*2, qty: Math.floor(Math.random()*500) + 100 })),
@@ -34,7 +36,7 @@ export default function ManualTradeView() {
     const fetchHistory = () => {
       const token = localStorage.getItem('token');
       const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-      fetch('http://localhost:8000/api/history', { headers })
+      fetch(`${API_URL}/api/history`, { headers })
       .then(r => r.json())
       .then(d => setHistory(d.history?.filter(h => h.status && h.status.includes('Manual')) || []));
     };
@@ -51,7 +53,7 @@ export default function ManualTradeView() {
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
       
-      const resp = await fetch('http://localhost:8000/api/execute/manual', {
+      const resp = await fetch(`${API_URL}/api/execute/manual`, {
         method: 'POST',
         headers,
         body: JSON.stringify({

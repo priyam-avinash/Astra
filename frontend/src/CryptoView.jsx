@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { API_URL } from './config';
+
 import {
   TrendingUp, TrendingDown, RefreshCw, Globe, IndianRupee,
   Activity, AlertTriangle, ChevronRight, Bitcoin, Zap
@@ -133,7 +135,7 @@ export default function CryptoView({ onNavigateToAnalysis }) {
   const [loading, setLoading] = useState(false);
   const [signalMap, setSignalMap] = useState({});
 
-  const API = 'http://localhost:8000';
+  const API = API_URL;
   const headers = () => {
     const t = localStorage.getItem('token');
     return t ? { Authorization: `Bearer ${t}` } : {};

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Square, TrendingUp, TrendingDown, Clock, Activity, RefreshCw } from 'lucide-react';
 
+import { API_URL } from './config';
+
 export default function ActiveTradesView({ positions, setPositions }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -8,7 +10,7 @@ export default function ActiveTradesView({ positions, setPositions }) {
 
   const fetchPositions = async () => {
     try {
-      const r = await fetch('http://localhost:8000/api/positions');
+      const r = await fetch(`${API_URL}/api/positions`);
       if (!r.ok) throw new Error('Failed to fetch positions');
       const d = await r.json();
       setPositions(d.positions || []);
@@ -20,7 +22,7 @@ export default function ActiveTradesView({ positions, setPositions }) {
   const handleSquareOff = async (id) => {
     setSquaringOff(id);
     try {
-      const r = await fetch(`http://localhost:8000/api/positions/squareoff/${id}`, {
+      const r = await fetch(`${API_URL}/api/positions/squareoff/${id}`, {
         method: 'POST'
       });
       if (!r.ok) throw new Error('Failed to square off position');

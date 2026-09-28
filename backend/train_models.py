@@ -111,22 +111,41 @@ def train_rf(ai_engine, df):
         return False
 
 
-def train_lstm_equity(ai_engine, df):
-    """Train and save Bidirectional LSTM equity model."""
+def train_lstm_equity(ai_engine, symbols: list, period: str = "2y"):
+    """Train and save 3-class BiLSTM equity model with per-symbol scalers."""
+    import pandas as pd
     logger.info("=" * 50)
-    logger.info("Training ASTRA.ML Equity (Bidirectional LSTM + Attention)")
+    logger.info("Training ASTRA.ML Equity (3-class BiLSTM + Attention + Symbol Scaler)")
     logger.info("=" * 50)
-    model, scaler = ai_engine.train_model_lstm(df, lookback=30)
-    if model and scaler:
-        model_path = os.path.join(MODELS_DIR, "astra_lstm_equity.keras")
+
+    # Build per-symbol dict — train_model_lstm needs each symbol's raw DataFrame separately
+    df_per_symbol = {}
+    for sym in symbols:
+        logger.info(f"Fetching {sym}...")
+        df = ai_engine._fetch_data(sym, period=period, interval="1d")
+        if df is not None and not df.empty and len(df) > 60:
+            df_per_symbol[sym] = df
+            logger.info(f"  → {len(df)} bars for {sym}")
+        else:
+            logger.warning(f"  → Skipped {sym} (no data)")
+
+    if len(df_per_symbol) < 5:
+        logger.error(f"Only {len(df_per_symbol)} symbols with data — need at least 5. Aborting.")
+        return False
+
+    logger.info(f"Training on {len(df_per_symbol)} symbols...")
+    model, scaler_dict = ai_engine.train_model_lstm(df_per_symbol, lookback=30, target_days=20)
+
+    if model and scaler_dict:
+        model_path  = os.path.join(MODELS_DIR, "astra_lstm_equity.keras")
         scaler_path = os.path.join(MODELS_DIR, "astra_lstm_equity_scaler.joblib")
         model.save(model_path)
-        joblib.dump(scaler, scaler_path)
-        logger.info(f"✅ Saved Equity LSTM → {model_path}")
-        logger.info(f"✅ Saved Equity Scaler → {scaler_path}")
+        joblib.dump(scaler_dict, scaler_path)
+        logger.info(f"✅ Saved 3-class Equity LSTM → {model_path}")
+        logger.info(f"✅ Saved Symbol Scaler dict ({len(scaler_dict)} symbols) → {scaler_path}")
         return True
     else:
-        logger.error("❌ Equity LSTM training failed (TensorFlow may not be installed)")
+        logger.error("❌ Equity LSTM training failed")
         return False
 
 
@@ -175,11 +194,11 @@ def main():
     if not equity_df.empty:
         logger.info(f"   Total equity rows: {len(equity_df)}")
 
-        # ── 2. Train Random Forest ──
+        # ── 2. Train Random Forest (still uses flat concatenated dataframe) ──
         results["rf"] = train_rf(ai_engine, equity_df)
 
-        # ── 3. Train Equity LSTM ──
-        results["lstm_equity"] = train_lstm_equity(ai_engine, equity_df)
+        # ── 3. Train Equity LSTM (fetches per-symbol internally for per-symbol scalers) ──
+        results["lstm_equity"] = train_lstm_equity(ai_engine, list(EQUITY_TRAIN_SYMBOLS))
     else:
         logger.error("❌ Cannot train equity models — no data available")
         results["rf"] = False

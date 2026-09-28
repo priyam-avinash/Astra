@@ -148,6 +148,41 @@ FEATURE_COLS = [
 ]
 
 
+# ── Custom Keras layer for ASTRA.ML (lazy + serialization-registered) ─────────
+# Defined via a cached factory so that (a) TensorFlow is only imported when the
+# LSTM path is actually used (preserving the no-TF fallback), and (b) the class
+# is registered with Keras's serialization registry BEFORE any load_model() call.
+# Without registration, tf.keras.models.load_model() cannot reconstruct the layer
+# and ASTRA.ML silently disables itself on every restart.
+_LUONG_ATTENTION_CLS = None
+
+
+def _get_luong_attention_cls():
+    """Build, register, and cache the LuongAttention layer class. Returns the class."""
+    global _LUONG_ATTENTION_CLS
+    if _LUONG_ATTENTION_CLS is not None:
+        return _LUONG_ATTENTION_CLS
+
+    import tensorflow as tf
+
+    @tf.keras.saving.register_keras_serializable(package="astra")
+    class LuongAttention(tf.keras.layers.Layer):
+        """Dot-product attention over LSTM timesteps -> context vector."""
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.score_dense = tf.keras.layers.Dense(1, use_bias=False)
+
+        def call(self, hidden_states):
+            # hidden_states: (batch, timesteps, features)
+            score = self.score_dense(hidden_states)          # (batch, timesteps, 1)
+            weights = tf.nn.softmax(score, axis=1)           # (batch, timesteps, 1)
+            context = tf.reduce_sum(weights * hidden_states, axis=1)  # (batch, features)
+            return context
+
+    _LUONG_ATTENTION_CLS = LuongAttention
+    return LuongAttention
+
+
 class AIPredictionEngine:
     def __init__(self):
         logger.info("Initialized ASTRA Equity Engine v3.0 (20-feature multi-confirmation system)")
@@ -172,7 +207,12 @@ class AIPredictionEngine:
             if os.path.exists(lstm_path) and os.path.exists(scaler_path):
                 try:
                     import tensorflow as tf
-                    self.lstm_model = tf.keras.models.load_model(lstm_path)
+                    # Register the custom attention layer before loading so Keras
+                    # can reconstruct it (otherwise load_model raises on the layer).
+                    luong_cls = _get_luong_attention_cls()
+                    self.lstm_model = tf.keras.models.load_model(
+                        lstm_path, custom_objects={"LuongAttention": luong_cls}
+                    )
                     self.lstm_scaler = joblib.load(scaler_path)
                     logger.info("Loaded ASTRA.ML (Bidirectional LSTM) model.")
                 except ImportError:
@@ -980,80 +1020,138 @@ class AIPredictionEngine:
         )
         return model
 
-    def train_model_lstm(self, df: pd.DataFrame, lookback: int = 30):
+    def train_model_lstm(
+        self,
+        df_per_symbol: dict,          # {symbol: pd.DataFrame of OHLCV}
+        lookback: int = 30,
+        target_days: int = 20,        # 20-day return → aligned with 40-day hold period
+        label_threshold_pct: float = 1.5,
+    ):
         """
-        Build and train Bidirectional LSTM with Attention for equity predictions.
-        Architecture: BiLSTM(128) → BiLSTM(64) → Attention → Dense(32) → Dense(1)
+        Build and train 3-class BiLSTM with Luong Attention.
+
+        Architecture: BiLSTM(64) → BiLSTM(32) → Attention → Dense(16) → Dense(3, softmax)
+        Output classes: 0=DOWN (<-1.5%), 1=NEUTRAL, 2=UP (>+1.5%)
+        Scaler: per-symbol RobustScaler fitted only on that symbol's training split.
+
+        Args:
+            df_per_symbol: dict mapping bare symbol (e.g. "TCS") to its OHLCV DataFrame.
+            lookback: sequence length for LSTM input.
+            target_days: forward return horizon for labeling.
+            label_threshold_pct: pnl % boundary between NEUTRAL and UP/DOWN.
+
+        Returns:
+            (model, scaler_dict) where scaler_dict = {symbol: RobustScaler}
         """
         try:
             import tensorflow as tf
             from sklearn.preprocessing import RobustScaler
 
-            df = self._compute_features(df)
-            if df.empty or len(df) < lookback + 50:
-                logger.error("Insufficient data for LSTM training")
+            all_X_train, all_y_train = [], []
+            all_X_val,   all_y_val   = [], []
+            scaler_dict: dict = {}
+
+            for symbol, raw_df in df_per_symbol.items():
+                df = self._compute_features(raw_df)
+                if df.empty or len(df) < lookback + target_days + 10:
+                    logger.debug(f"Skipping {symbol}: insufficient rows after feature compute")
+                    continue
+
+                # 20-day forward return → 3-class label
+                df["Target_pct"] = df["Close"].pct_change(target_days).shift(-target_days) * 100
+                df = df.dropna(subset=FEATURE_COLS + ["Target_pct"])
+                if len(df) < lookback + 20:
+                    continue
+
+                raw_X = df[FEATURE_COLS].values
+                y_raw = df["Target_pct"].values
+
+                # Labels: 0=DOWN, 1=NEUTRAL, 2=UP
+                y = np.where(
+                    y_raw >  label_threshold_pct, 2,
+                    np.where(y_raw < -label_threshold_pct, 0, 1)
+                ).astype(np.int32)
+
+                # Build sequences
+                X_seq, y_seq = [], []
+                for i in range(lookback, len(raw_X) - target_days):
+                    X_seq.append(raw_X[i - lookback:i])
+                    y_seq.append(y[i])
+                if len(X_seq) < 20:
+                    continue
+                X_seq, y_seq = np.array(X_seq), np.array(y_seq)
+
+                # Chronological 80/20 split
+                split = int(len(X_seq) * 0.8)
+                X_tr_raw, X_val_raw = X_seq[:split], X_seq[split:]
+                y_tr,     y_val     = y_seq[:split], y_seq[split:]
+
+                if len(X_tr_raw) < 10:
+                    continue
+
+                # Fit scaler ONLY on this symbol's training data
+                n_tr, n_steps, n_feats = X_tr_raw.shape
+                scaler = RobustScaler()
+                X_tr  = scaler.fit_transform(X_tr_raw.reshape(-1, n_feats)).reshape(n_tr, n_steps, n_feats)
+                X_val = scaler.transform(X_val_raw.reshape(-1, n_feats)).reshape(len(X_val_raw), n_steps, n_feats)
+                scaler_dict[symbol] = scaler
+
+                all_X_train.append(X_tr);   all_y_train.append(y_tr)
+                all_X_val.append(X_val);    all_y_val.append(y_val)
+
+            if not all_X_train:
+                logger.error("No valid symbols for LSTM training after feature compute")
                 return None, None
 
-            # Target: 3-day forward return
-            df["Target"] = df["Close"].pct_change(3).shift(-3) * 100
-            df = df.dropna(subset=FEATURE_COLS + ["Target"])
+            X_train = np.concatenate(all_X_train, axis=0)
+            y_train = np.concatenate(all_y_train, axis=0)
+            X_val   = np.concatenate(all_X_val,   axis=0)
+            y_val   = np.concatenate(all_y_val,   axis=0)
 
-            raw_X = df[FEATURE_COLS].values
-            y = df["Target"].values
+            logger.info(
+                f"LSTM training: {X_train.shape[0]} train / {X_val.shape[0]} val sequences "
+                f"from {len(scaler_dict)} symbols. "
+                f"Class dist train: {np.bincount(y_train).tolist()}"
+            )
 
-            # Build sequences before scaling (no data leakage)
-            X_seq, y_seq = [], []
-            for i in range(lookback, len(raw_X) - 1):
-                X_seq.append(raw_X[i - lookback:i])
-                y_seq.append(y[i])
-            X_seq, y_seq = np.array(X_seq), np.array(y_seq)
+            # ── Luong-style attention — registered class so it survives save/reload ──
+            LuongAttention = _get_luong_attention_cls()
 
-            # Chronological 80/20 split
-            split = int(len(X_seq) * 0.8)
-            X_train_raw, X_val_raw = X_seq[:split], X_seq[split:]
-            y_train, y_val = y_seq[:split], y_seq[split:]
-
-            # Fit scaler only on train data, transform both
-            n_train, n_steps, n_feats = X_train_raw.shape
-            scaler = RobustScaler()
-            X_train = scaler.fit_transform(X_train_raw.reshape(-1, n_feats)).reshape(n_train, n_steps, n_feats)
-            X_val = scaler.transform(X_val_raw.reshape(-1, n_feats)).reshape(X_val_raw.shape[0], n_steps, n_feats)
-
-            # ── Bidirectional LSTM with Attention (no Lambda layers) ──
-            inputs = tf.keras.Input(shape=(lookback, len(FEATURE_COLS)))
+            # ── Architecture: smaller = less overfitting on financial time series ──
+            inputs  = tf.keras.Input(shape=(lookback, len(FEATURE_COLS)))
             x = tf.keras.layers.Bidirectional(
-                tf.keras.layers.LSTM(128, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)
+                tf.keras.layers.LSTM(64, return_sequences=True, dropout=0.2, recurrent_dropout=0.1)
             )(inputs)
             x = tf.keras.layers.Bidirectional(
-                tf.keras.layers.LSTM(64, return_sequences=True, dropout=0.2)
+                tf.keras.layers.LSTM(32, return_sequences=True, dropout=0.2)
             )(x)
-            # GlobalAveragePooling1D instead of Lambda sum (safe to serialize)
-            context = tf.keras.layers.GlobalAveragePooling1D()(x)
-            x = tf.keras.layers.Dense(32, activation="relu")(context)
+            context = LuongAttention()(x)                           # learned attention pooling
+            x = tf.keras.layers.Dense(16, activation="relu")(context)
             x = tf.keras.layers.Dropout(0.3)(x)
-            outputs = tf.keras.layers.Dense(1)(x)
+            outputs = tf.keras.layers.Dense(3, activation="softmax")(x)  # 3-class
 
             model = tf.keras.Model(inputs, outputs)
             model.compile(
                 optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-                loss="huber"
+                loss="sparse_categorical_crossentropy",
+                metrics=["accuracy"],
             )
 
             callbacks = [
-                tf.keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True),
-                tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=7, min_lr=1e-6),
+                tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
+                tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5, min_lr=1e-6),
             ]
 
             model.fit(
                 X_train, y_train,
                 validation_data=(X_val, y_val),
-                epochs=100,
-                batch_size=32,
+                epochs=60,
+                batch_size=64,
                 callbacks=callbacks,
-                verbose=1
+                verbose=1,
             )
-            logger.info(f"LSTM equity model trained: {X_train.shape}")
-            return model, scaler
+            logger.info(f"LSTM equity model trained: {X_train.shape} | symbols: {len(scaler_dict)}")
+            return model, scaler_dict
 
         except ImportError:
             logger.error("TensorFlow not available. Cannot train LSTM.")

@@ -441,3 +441,37 @@ def test_training_universe_has_83_symbols():
     assert set(mod.EQUITY_TRAIN_SYMBOLS) == set(INTRADAY_UNIVERSE), (
         f"Expected {len(INTRADAY_UNIVERSE)} symbols, got {len(mod.EQUITY_TRAIN_SYMBOLS)}"
     )
+
+
+def test_lstm_model_outputs_3_classes():
+    """Saved LSTM model must output 3-class softmax probabilities, not a scalar."""
+    import os
+    models_dir = os.path.join(
+        os.path.dirname(__file__), "..", "app", "models", "saved_models"
+    )
+    keras_path = os.path.join(models_dir, "astra_lstm_equity.keras")
+    if not os.path.exists(keras_path):
+        import pytest; pytest.skip("Model not yet retrained")
+    try:
+        import tensorflow as tf
+        model = tf.keras.models.load_model(keras_path)
+        assert model.output_shape[-1] == 3, (
+            f"Expected 3-class output, got shape {model.output_shape}"
+        )
+    except ImportError:
+        import pytest; pytest.skip("TensorFlow not installed")
+
+
+def test_lstm_scaler_is_dict():
+    """Saved scaler must be a dict of {symbol: RobustScaler}, not a single scaler."""
+    import os, joblib
+    models_dir = os.path.join(
+        os.path.dirname(__file__), "..", "app", "models", "saved_models"
+    )
+    scaler_path = os.path.join(models_dir, "astra_lstm_equity_scaler.joblib")
+    if not os.path.exists(scaler_path):
+        import pytest; pytest.skip("Scaler not yet retrained")
+    scaler = joblib.load(scaler_path)
+    assert isinstance(scaler, dict), f"Expected dict, got {type(scaler)}"
+    first_val = next(iter(scaler.values()))
+    assert hasattr(first_val, "transform"), "Scaler values must have .transform()"

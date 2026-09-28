@@ -1,0 +1,4 @@
+entry_bar,exit_bar,bars_held,direction,entry_price,exit_price,exit_reason,pnl_pct,pnl_cash,capital
+71,113,42,BUY,24619.5536,25498.5982,TP,3.541,354.05,100354.05
+182,185,3,BUY,25271.479,24823.1987,SL,-1.804,-181.02,100173.03
+223,236,13,BUY,22560.9252,24520.6721,TP,8.656,867.14,101040.17

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { WS_URL as WS_ORIGIN } from '../config';
 
-const WS_URL = 'ws://localhost:8000/ws/prices';
+const WS_URL = `${WS_ORIGIN}/ws/prices`;
 const RECONNECT_DELAY_MS = 5000;
 
 export default function useLivePrices() {
