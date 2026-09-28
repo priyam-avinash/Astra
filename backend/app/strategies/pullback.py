@@ -65,17 +65,11 @@ def _nifty_above_ema200(date) -> bool:
     """True if NIFTY Close > EMA200 on or just before `date`. Fail-open."""
     global _NIFTY_CACHE
     if _NIFTY_CACHE is None:
-        # Use yf.download() directly — avoids yahoo_service retry/backoff hanging
+        # v1.13: shared market-data layer (fast-failing, cached)
         try:
-            import yfinance as yf
-            raw = yf.download(
-                "^NSEI", period="2y", interval="1d",
-                auto_adjust=True, progress=False, threads=False
-            )
-            if raw is not None and not raw.empty and len(raw) >= 210:
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-                raw.index = pd.to_datetime(raw.index).tz_localize(None)
+            from app.services.market_data import market_data
+            raw = market_data.get_ohlcv("^NSEI", period="2y", interval="1d")
+            if len(raw) >= 210:
                 df = raw[["Close"]].sort_index().copy()
                 df["EMA200"] = compute_ema(df["Close"], 200)
                 _NIFTY_CACHE = df

@@ -144,7 +144,7 @@ export default function App() {
   useEffect(() => {
     fetch(`${API_URL}/api/settings`)
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.settings?.llm_enabled) setLlmGlobalOn(d.settings.llm_enabled === 'true'); })
+      .then(d => { if (d?.llm_enabled != null) setLlmGlobalOn(d.llm_enabled === 'true' || d.llm_enabled === true); })
       .catch(() => {});
   }, []);
 

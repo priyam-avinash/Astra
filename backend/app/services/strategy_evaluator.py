@@ -265,19 +265,12 @@ def _fetch_2y_daily(symbol: str) -> Optional[pd.DataFrame]:
                 return df
     except Exception:
         pass
+    # v1.13: shared market-data layer (Yahoo via curl_cffi, fallbacks, cache)
     try:
-        import yfinance as yf
-        raw = yf.download(
-            f"{symbol}.NS", period="2y", interval="1d",
-            auto_adjust=True, progress=False, threads=False
-        )
-        if raw is not None and not raw.empty and len(raw) > 200:
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
-            raw.index = pd.to_datetime(raw.index).tz_localize(None)
-            raw.index.name = "Date"
-            cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in raw.columns]
-            return raw[cols].copy()
+        from app.services.market_data import market_data
+        df = market_data.get_ohlcv(f"{symbol}.NS", period="2y", interval="1d")
+        if len(df) > 200:
+            return df.copy()
     except Exception:
         pass
     return None

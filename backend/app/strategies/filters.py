@@ -35,14 +35,10 @@ def _load_india_vix() -> Optional[pd.Series]:
     if _VIX_CACHE is not None:
         return _VIX_CACHE
     try:
-        import yfinance as yf
-        raw = yf.download("^INDIAVIX", period="3y", interval="1d",
-                          auto_adjust=True, progress=False)
-        if raw is not None and not raw.empty:
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
-            s = raw["Close"].sort_index()
-            _VIX_CACHE = s
+        from app.services.market_data import market_data
+        raw = market_data.get_ohlcv("^INDIAVIX", period="3y", interval="1d")
+        if not raw.empty:
+            _VIX_CACHE = raw["Close"].sort_index()
             return _VIX_CACHE
     except Exception:
         pass

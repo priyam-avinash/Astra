@@ -357,7 +357,11 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
 
     df = _fetch_intraday_extended(clean, days=days)
     if df.empty:
-        return {"error": f"No intraday data available for {clean}", "symbol": clean}
+        return {"error": (f"No real 15-minute data available for {clean}. "
+                          "Check /api/data/health (Yahoo reachable? Dhan configured?)."),
+                "symbol": clean}
+    data_source = df.attrs.get("source") or "unknown"
+    is_synthetic = data_source == "synthetic"
 
     # Ensure IST timezone
     if df.index.tz is None:
@@ -465,6 +469,8 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
         },
         "trade_log":    trade_log,
         "equity_curve": equity_curve,
+        "data_source": data_source,
+        "synthetic_data": is_synthetic,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "note": (
             "Backtest uses ₹1L notional per trade. ATR-based SL/TP (1× ATR SL, 3× ATR TP, "

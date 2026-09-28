@@ -53,8 +53,12 @@ def test_dhan_live_broker_raises_even_with_credentials(monkeypatch):
         live.execute_trade("RELIANCE", "SELL", 1, 100.0)
 
 
-def test_paper_trade_returns_mode_paper():
+def test_paper_trade_returns_mode_paper(monkeypatch):
     """Sanity: paper trades must label themselves PAPER and never LIVE."""
+    from app.services.market_data import market_data
+    # v1.13: paper fills need a live (non-stale) quote — stub it so this runs offline
+    monkeypatch.setattr(market_data, "get_quote_info",
+                        lambda s, max_age=30: {"price": 1000.0, "source": "test", "stale": False, "ts": None})
     from app.services.broker import broker_service
     result = broker_service.execute_trade("RELIANCE", "BUY", 1, 1000.0)
     assert result["mode"] == "PAPER", (

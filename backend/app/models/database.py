@@ -3,14 +3,16 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-# Default to sqlite for local development if no DATABASE_URL is provided
-if not DATABASE_URL:
-    DATABASE_URL = "sqlite:///./astra_trading.db"
-elif not DATABASE_URL.startswith("postgresql"):
-    # If a URL is provided but it's not postgres, still check for sqlite pattern
-    if "sqlite" not in DATABASE_URL:
-         DATABASE_URL = "sqlite:///./astra_trading.db"
+from app.core.config import BACKEND_DIR
+
+# SQLite path is anchored to backend/ (it used to be relative to the current
+# working directory, so starting the server from the repo root silently
+# created a second, empty database).
+_DEFAULT_SQLITE = f"sqlite:///{BACKEND_DIR / 'astra_trading.db'}"
+
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip().strip('"')
+if not DATABASE_URL or not (DATABASE_URL.startswith("postgresql") or DATABASE_URL.startswith("sqlite")):
+    DATABASE_URL = _DEFAULT_SQLITE
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

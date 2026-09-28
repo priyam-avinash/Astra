@@ -78,35 +78,41 @@ async def websocket_prices(websocket: WebSocket):
     # Active symbol set for this connection
     subscribed_symbols: set = set()
 
-    # Add any symbols already tracked by the feed manager
-    if dhan_feed_manager is not None:
-        for sym in dhan_feed_manager._subscriptions:
-            subscribed_symbols.add(sym)
+    # Symbols streamed by the Dhan feed are pushed only from the in-memory tick
+    # cache (no network). Symbols the client subscribes to explicitly are also
+    # polled via market_data — always in a worker thread, never on the event
+    # loop (v1.12 called blocking HTTP here, which froze the whole API server).
+    feed_symbols: set = set(dhan_feed_manager._subscriptions) if dhan_feed_manager is not None else set()
 
-    def _get_price_entry(symbol: str) -> dict:
-        """Get the best available price for a symbol with metadata."""
-        # 1. Try DhanFeed live price (freshest)
+    def _live_entry(symbol: str) -> dict:
         if dhan_feed_manager is not None:
             live = dhan_feed_manager.get_price(symbol)
             if live and live > 0:
                 return {"price": live, "source": "dhan_ws", "ts": datetime.now().isoformat()}
-        # 2. Fallback: ai_engine real-time price (may use cache or external APIs)
-        if ai_engine is not None:
-            try:
-                p = ai_engine.get_realtime_price(symbol)
-                if p and p > 0:
-                    return {"price": p, "source": "cache", "ts": datetime.now().isoformat()}
-            except Exception:
-                pass
         return {}
 
-    # Send initial snapshot
+    def _polled_entry(symbol: str) -> dict:
+        entry = _live_entry(symbol)
+        if entry:
+            return entry
+        try:
+            from app.services.market_data import market_data
+            info = market_data.get_quote_info(symbol)
+            if info["price"] > 0:
+                return {"price": info["price"], "source": info["source"] or "cache",
+                        "stale": info["stale"], "ts": datetime.now().isoformat()}
+        except Exception:
+            pass
+        return {}
+
+    async def _get_price_entry(symbol: str) -> dict:
+        if symbol in subscribed_symbols:
+            return await asyncio.to_thread(_polled_entry, symbol)
+        return _live_entry(symbol)
+
+    # Initial snapshot: whatever the live feed already has (instant, no network)
     try:
-        snapshot_prices = {}
-        for sym in subscribed_symbols:
-            entry = _get_price_entry(sym)
-            if entry:
-                snapshot_prices[sym] = entry
+        snapshot_prices = {s: e for s in feed_symbols if (e := _live_entry(s))}
         await websocket.send_json({"type": "snapshot", "prices": snapshot_prices})
     except Exception as e:
         logger.debug(f"WS /ws/prices: snapshot send error: {e}")
@@ -132,7 +138,7 @@ async def websocket_prices(websocket: WebSocket):
                                 dhan_feed_manager.subscribe(sym)
                             logger.debug(f"WS /ws/prices: client subscribed to {sym}")
                             # Send immediate price if available
-                            entry = _get_price_entry(sym)
+                            entry = await _get_price_entry(sym)
                             if entry:
                                 await websocket.send_json({
                                     "type": "tick",
@@ -155,8 +161,8 @@ async def websocket_prices(websocket: WebSocket):
 
             if feed_live:
                 # Push any changed prices every 1 second
-                for sym in list(subscribed_symbols):
-                    entry = _get_price_entry(sym)
+                for sym in list(subscribed_symbols | feed_symbols):
+                    entry = await _get_price_entry(sym)
                     if not entry:
                         continue
                     prev_price = last_sent.get(sym)
@@ -179,7 +185,7 @@ async def websocket_prices(websocket: WebSocket):
                 if elapsed >= _FALLBACK_POLL_INTERVAL:
                     last_fallback_poll = now
                     for sym in list(subscribed_symbols):
-                        entry = _get_price_entry(sym)
+                        entry = await _get_price_entry(sym)
                         if not entry:
                             continue
                         try:

@@ -21,7 +21,7 @@ Data Source: yfinance (commodity futures continuous contracts)
 import logging
 import numpy as np
 import pandas as pd
-import yfinance as yf
+from app.services.market_data import market_data
 from datetime import datetime, timedelta
 import pytz
 
@@ -75,24 +75,16 @@ class CommoditiesEngine:
             if now - ts < self._cache_ttl:
                 return df
 
-        try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval="1d", auto_adjust=True)
-            if df.empty:
-                raise ValueError(f"No data returned for {symbol}")
-            df.index = pd.to_datetime(df.index)
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-            self._cache[symbol] = (now, df)
-            return df
-        except Exception as e:
-            logger.error(f"Commodity data fetch failed for {symbol}: {e}")
-            raise
+        df = market_data.get_ohlcv(symbol, period=period, interval="1d")
+        if df.empty:
+            raise ValueError(f"No data for {symbol} from any provider — see /api/data/health")
+        self._cache[symbol] = (now, df)
+        return df
 
     def _fetch_vix(self) -> float:
         """Fetch VIX (fear gauge) as macro filter."""
         try:
-            vix = yf.Ticker("^VIX").history(period="5d")
+            vix = market_data.get_ohlcv("^VIX", period="5d", interval="1d")
             return float(vix["Close"].iloc[-1]) if not vix.empty else 20.0
         except Exception:
             return 20.0  # default to neutral
@@ -100,7 +92,7 @@ class CommoditiesEngine:
     def _fetch_dxy(self) -> float:
         """Fetch DXY (US Dollar Index) — inverse proxy for gold/silver."""
         try:
-            dxy = yf.Ticker("DX-Y.NYB").history(period="5d")
+            dxy = market_data.get_ohlcv("DX-Y.NYB", period="1mo", interval="1d")
             if dxy.empty:
                 return 103.0
             closes = dxy["Close"].dropna()
@@ -206,7 +198,7 @@ class CommoditiesEngine:
         elif asset_class == "base":
             # Base metals: follow global growth (approximate with NIFTY trend)
             try:
-                nifty = yf.Ticker("^NSEI").history(period="6mo")
+                nifty = market_data.get_ohlcv("^NSEI", period="6mo", interval="1d")
                 if not nifty.empty:
                     nifty_sma50 = nifty["Close"].rolling(50).mean().iloc[-1]
                     nifty_now   = nifty["Close"].iloc[-1]

@@ -1,14 +1,24 @@
 """
-ASTRA Dhan HQ Data Service (Phase 1)
-=====================================
-Wraps the dhanhq library to provide OHLCV historical data and real-time quotes
-from the Dhan API. Used as the primary (priority #0.5) data source in the
-ASTRA prediction engine — unlimited, native NSE/BSE, no external rate limits.
+ASTRA Dhan HQ Data Service
+==========================
+Market DATA only (historical candles + quotes). This module never places
+orders — ASTRA is paper-trading only (see broker.py).
 
-Graceful degradation: if DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN are missing or
-contain placeholder text, all public methods return empty DataFrame / 0.0
-without raising exceptions.
+Fixes in v1.13
+--------------
+* dhanhq >= 2.1 requires `dhanhq(DhanContext(client_id, token))`; the old
+  `dhanhq(client_id, token)` call raised inside the library and the client
+  silently stayed None. Both signatures are supported now.
+* Candle arrays live under response["data"] (the old parser read the top
+  level, so every Dhan response parsed as empty).
+* Failures raise DhanError(kind, msg) so the data layer can show *why*
+  (expired token, no Data-API subscription, …) instead of "no data".
+
+Note: Dhan's historical/quote endpoints require an active Data API plan on
+your Dhan account, and access tokens expire (24h for session tokens).
 """
+from __future__ import annotations
+
 import logging
 import os
 from datetime import datetime, timedelta
@@ -16,311 +26,191 @@ from typing import Optional
 
 import pandas as pd
 
+from app.core.config import get_secret
+
 logger = logging.getLogger(__name__)
 
-# ── Scrip master path ────────────────────────────────────────────────────────
-_SCRIP_MASTER_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "data", "dhan_scrip_master.csv"
-)
+_SCRIP_MASTER_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "dhan_scrip_master.csv")
 
-# ── Symbol → security_id cache (populated at import time) ───────────────────
-# Key: trading symbol (e.g. "RELIANCE"), Value: security_id string (e.g. "2885")
-_SYMBOL_CACHE: dict = {}
+_INTRADAY_INTERVAL_MAP = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}
 
-# ── Interval mapping (yfinance → Dhan) ──────────────────────────────────────
-_INTRADAY_INTERVAL_MAP = {
-    "1h": 60,
-    "15m": 15,
-    "5m": 5,
-    "1m": 1,
-}
 
-# ── Period → days mapping ────────────────────────────────────────────────────
-_PERIOD_DAYS = {
-    "1mo": 30,
-    "3mo": 90,
-    "6mo": 180,
-    "1y": 365,
-    "2y": 730,
-}
-
-_PLACEHOLDER_TOKENS = {
-    "ENTER_YOUR_DHAN_CLIENT_ID_HERE",
-    "ENTER_YOUR_DHAN_ACCESS_TOKEN_HERE",
-    "",
-    "None",
-    "none",
-}
+class DhanError(Exception):
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
 
 
 def _load_symbol_cache() -> dict:
-    """
-    Parse the Dhan scrip master CSV and build a symbol → security_id map
-    for NSE EQ instruments (series == 'EQ', instrument == 'EQUITY', exchange == 'NSE').
-    Falls back gracefully if the file is missing.
-    """
+    """NSE EQ trading symbol → security_id, from the Dhan scrip master CSV."""
     cache: dict = {}
     try:
-        df = pd.read_csv(_SCRIP_MASTER_PATH, dtype=str, low_memory=False)
-        # Filter: NSE exchange, EQUITY instrument type, EQ series
-        mask = (
-            (df["SEM_EXM_EXCH_ID"].str.strip() == "NSE")
-            & (df["SEM_INSTRUMENT_NAME"].str.strip() == "EQUITY")
-            & (df["SEM_SERIES"].str.strip() == "EQ")
-        )
-        nse_eq = df[mask][["SEM_TRADING_SYMBOL", "SEM_SMST_SECURITY_ID"]].dropna()
-        for _, row in nse_eq.iterrows():
-            sym = str(row["SEM_TRADING_SYMBOL"]).strip()
-            sec_id = str(row["SEM_SMST_SECURITY_ID"]).strip()
-            if sym and sec_id:
-                cache[sym] = sec_id
-        logger.info(f"Dhan scrip master loaded: {len(cache)} NSE EQ symbols cached")
+        df = pd.read_csv(_SCRIP_MASTER_PATH, dtype=str, low_memory=False,
+                         usecols=["SEM_EXM_EXCH_ID", "SEM_INSTRUMENT_NAME", "SEM_SERIES",
+                                  "SEM_TRADING_SYMBOL", "SEM_SMST_SECURITY_ID"])
+        mask = ((df["SEM_EXM_EXCH_ID"].str.strip() == "NSE")
+                & (df["SEM_INSTRUMENT_NAME"].str.strip() == "EQUITY")
+                & (df["SEM_SERIES"].str.strip() == "EQ"))
+        sub = df.loc[mask, ["SEM_TRADING_SYMBOL", "SEM_SMST_SECURITY_ID"]].dropna()
+        cache = dict(zip(sub["SEM_TRADING_SYMBOL"].str.strip().str.upper(),
+                         sub["SEM_SMST_SECURITY_ID"].str.strip()))
+        logger.info(f"Dhan scrip master loaded: {len(cache)} NSE EQ symbols")
     except FileNotFoundError:
-        logger.warning(f"Dhan scrip master not found at {_SCRIP_MASTER_PATH}; symbol resolution disabled")
+        logger.warning(f"Dhan scrip master not found at {_SCRIP_MASTER_PATH}")
     except Exception as e:
         logger.error(f"Failed to load Dhan scrip master: {e}")
     return cache
 
 
-# Populate cache at module import
-_SYMBOL_CACHE = _load_symbol_cache()
+_SYMBOL_CACHE: dict = {}
+
+
+def _symbols() -> dict:
+    global _SYMBOL_CACHE
+    if not _SYMBOL_CACHE:
+        _SYMBOL_CACHE = _load_symbol_cache()
+    return _SYMBOL_CACHE
+
+
+def _classify(remarks) -> str:
+    text = str(remarks).lower()
+    if any(k in text for k in ("token", "auth", "invalid client", "dh-901", "dh-902", "unauthor", "expired")):
+        return "auth"
+    if any(k in text for k in ("subscri", "not enabled", "data api", "dh-903", "permission")):
+        return "auth"
+    if any(k in text for k in ("rate", "too many", "dh-904", "limit")):
+        return "rate_limit"
+    return "no_data"
 
 
 class DhanDataService:
-    """
-    Service for fetching OHLCV historical data and real-time quotes from Dhan HQ.
-
-    Usage:
-        from app.services.dhan_data import dhan_data_service
-        df = dhan_data_service.get_ohlcv("RELIANCE", period="6mo", interval="1d")
-        price = dhan_data_service.get_quote("RELIANCE")
-    """
-
     def __init__(self):
-        self._client_id: str = os.getenv("DHAN_CLIENT_ID", "")
-        self._access_token: str = os.getenv("DHAN_ACCESS_TOKEN", "")
-        self._client = None  # lazy-initialized on first use
+        self._client = None
+        self._client_key = None   # (client_id, token) the client was built with
 
-    def _get_client(self):
-        """Lazy-initialize and cache the dhanhq client."""
-        if self._client is not None:
-            return self._client
-        # Re-read env vars in case they were set after import
-        self._client_id = os.getenv("DHAN_CLIENT_ID", "")
-        self._access_token = os.getenv("DHAN_ACCESS_TOKEN", "")
-        if not self.is_available():
-            return None
-        try:
-            from dhanhq import dhanhq  # type: ignore
-            self._client = dhanhq(self._client_id, self._access_token)
-            logger.info("Dhan HQ client initialized successfully")
-        except ImportError:
-            logger.warning("dhanhq library not installed; Dhan data source disabled")
-            self._client = None
-        except Exception as e:
-            logger.error(f"Failed to initialize Dhan HQ client: {e}")
-            self._client = None
-        return self._client
-
-    # ─────────────────────── Public API ─────────────────────────────────────
+    # ── credentials / client ───────────────────────────────────────────────
+    @staticmethod
+    def _creds(token: Optional[str] = None):
+        """(client_id, access_token). A per-user `token` overrides the global one."""
+        return get_secret("dhan_client_id"), (token or get_secret("dhan_access_token"))
 
     def is_available(self, token: Optional[str] = None) -> bool:
-        """Return True only if credentials are set and not placeholder values."""
-        cid = os.getenv("DHAN_CLIENT_ID", "")
-        tok = token if token else os.getenv("DHAN_ACCESS_TOKEN", "")
-        return (
-            bool(cid)
-            and bool(tok)
-            and cid.strip() not in _PLACEHOLDER_TOKENS
-            and tok.strip() not in _PLACEHOLDER_TOKENS
-        )
+        cid, tok = self._creds(token)
+        return bool(cid and tok)
 
-    def _make_client(self, token: str):
-        """Create a one-shot dhanhq client with a specific access token."""
-        cid = os.getenv("DHAN_CLIENT_ID", "")
-        if not cid or cid.strip() in _PLACEHOLDER_TOKENS:
-            return None
+    def _get_client(self, token: Optional[str] = None):
+        cid, tok = self._creds(token)
+        if not (cid and tok):
+            raise DhanError("unsupported", "Dhan credentials not configured")
+        if self._client is not None and self._client_key == (cid, tok):
+            return self._client
+        if token:   # per-user token: one-shot client, don't replace the shared one
+            return self._build(cid, tok)
+        self._client, self._client_key = self._build(cid, tok), (cid, tok)
+        logger.info("Dhan HQ data client initialised")
+        return self._client
+
+    @staticmethod
+    def _build(cid, tok):
         try:
             from dhanhq import dhanhq  # type: ignore
-            return dhanhq(cid, token)
+        except ImportError:
+            raise DhanError("unsupported", "dhanhq library not installed")
+        try:
+            try:
+                from dhanhq import DhanContext  # dhanhq >= 2.1
+                client = dhanhq(DhanContext(str(cid), str(tok)))
+            except ImportError:
+                client = dhanhq(str(cid), str(tok))   # dhanhq 2.0.x
         except Exception as e:
-            logger.debug(f"Dhan temp client init failed: {e}")
-            return None
+            raise DhanError("auth", f"client init failed: {e}")
+        return client
 
     def resolve(self, symbol: str) -> tuple:
-        """
-        Resolve a trading symbol to (security_id, exchange_segment).
-        Returns (security_id_str, "NSE_EQ") if found, else (None, "").
-        Strips common suffixes like '.NS' before lookup.
-        """
-        clean = symbol.strip().replace(".NS", "").replace(".BSE", "").upper()
-        sec_id = _SYMBOL_CACHE.get(clean)
-        if sec_id:
-            return sec_id, "NSE_EQ"
-        return None, ""
+        clean = symbol.strip().upper().replace(".NS", "").replace(".BSE", "").replace(".BO", "")
+        sec_id = _symbols().get(clean)
+        return (sec_id, "NSE_EQ") if sec_id else (None, "")
 
-    def get_ohlcv(self, symbol: str, period: str = "6mo", interval: str = "1d",
+    @staticmethod
+    def _unwrap(response) -> dict:
+        """dhanhq returns {"status", "remarks", "data"}; raise on failure."""
+        if not isinstance(response, dict):
+            raise DhanError("no_data", f"unexpected response type {type(response).__name__}")
+        if response.get("status") == "failure":
+            remarks = response.get("remarks") or response.get("data") or "request failed"
+            raise DhanError(_classify(remarks), str(remarks)[:200])
+        data = response.get("data", response)
+        return data if isinstance(data, dict) else {}
+
+    # ── historical candles ─────────────────────────────────────────────────
+    def get_ohlcv(self, symbol: str, days: int = None, interval: str = "1d", period: str = None,
                   token: Optional[str] = None) -> pd.DataFrame:
-        """
-        Fetch OHLCV data for the given symbol.
-
-        Parameters
-        ----------
-        symbol : str
-            NSE trading symbol, e.g. "RELIANCE"
-        period : str
-            "1mo", "3mo", "6mo", "1y", "2y"
-        interval : str
-            "1d" → daily bars
-            "1h" → 60-min intraday
-            "15m" → 15-min intraday
-            "5m"  → 5-min intraday
-            "1m"  → 1-min intraday
-        token : str, optional
-            Per-user access token; falls back to env DHAN_ACCESS_TOKEN if None.
-
-        Returns
-        -------
-        pd.DataFrame with DatetimeIndex and columns [Open, High, Low, Close, Volume],
-        or empty DataFrame on failure.
-        """
-        if not self.is_available(token=token):
-            return pd.DataFrame()
-
-        sec_id, exchange_segment = self.resolve(symbol)
-        if sec_id is None:
-            logger.debug(f"Dhan: symbol '{symbol}' not found in scrip master")
-            return pd.DataFrame()
-
-        client = self._make_client(token) if token else self._get_client()
-        if client is None:
-            return pd.DataFrame()
-
-        # Compute date range
-        days = _PERIOD_DAYS.get(period, 180)
+        if not days:
+            days = {"1mo": 31, "3mo": 92, "6mo": 183, "1y": 366, "2y": 731}.get(period or "6mo", 183)
+        sec_id, seg = self.resolve(symbol)
+        if not sec_id:
+            raise DhanError("no_data", f"'{symbol}' not in Dhan scrip master")
+        client = self._get_client(token)
         to_date = datetime.now()
-        from_date = to_date - timedelta(days=days)
-        from_str = from_date.strftime("%Y-%m-%d")
-        to_str = to_date.strftime("%Y-%m-%d")
+        if interval == "1d":
+            from_date = to_date - timedelta(days=days)
+            resp = client.historical_daily_data(sec_id, seg, "EQUITY",
+                                                from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d"))
+        elif interval in _INTRADAY_INTERVAL_MAP:
+            from_date = to_date - timedelta(days=min(days, 89))   # Dhan: max 90 days per call
+            resp = client.intraday_minute_data(sec_id, seg, "EQUITY",
+                                               from_date.strftime("%Y-%m-%d %H:%M:%S"),
+                                               to_date.strftime("%Y-%m-%d %H:%M:%S"),
+                                               interval=_INTRADAY_INTERVAL_MAP[interval])
+        else:
+            raise DhanError("no_data", f"interval {interval} unsupported")
+        return self._parse_candles(self._unwrap(resp))
 
-        try:
-            if interval == "1d":
-                response = client.historical_daily_data(
-                    security_id=sec_id,
-                    exchange_segment=exchange_segment,
-                    instrument_type="EQUITY",
-                    from_date=from_str,
-                    to_date=to_str,
-                    expiry_code=0,
-                )
-            elif interval in _INTRADAY_INTERVAL_MAP:
-                dhan_interval = _INTRADAY_INTERVAL_MAP[interval]
-                response = client.intraday_minute_data(
-                    security_id=sec_id,
-                    exchange_segment=exchange_segment,
-                    instrument_type="EQUITY",
-                    from_date=from_str,
-                    to_date=to_str,
-                    interval=dhan_interval,
-                )
-            else:
-                logger.debug(f"Dhan: unsupported interval '{interval}'; falling back")
-                return pd.DataFrame()
+    @staticmethod
+    def _parse_candles(data: dict) -> pd.DataFrame:
+        closes, ts = data.get("close") or [], data.get("timestamp") or []
+        if not closes or not ts:
+            raise DhanError("no_data", "empty candle response")
+        n = min(len(closes), len(ts), *(len(data.get(k) or []) for k in ("open", "high", "low")))
+        df = pd.DataFrame({
+            "Open": data["open"][:n], "High": data["high"][:n], "Low": data["low"][:n],
+            "Close": closes[:n], "Volume": (data.get("volume") or [0] * n)[:n],
+        })
+        idx = pd.to_datetime(pd.Series(ts[:n]), unit="s", utc=True, errors="coerce")
+        df.index = idx.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).values
+        df.index.name = "Date"
+        return df.dropna().sort_index()
 
-            return self._parse_response(response, interval)
-
-        except Exception as e:
-            logger.debug(f"Dhan get_ohlcv failed for {symbol}: {e}")
-            return pd.DataFrame()
-
+    # ── quotes ─────────────────────────────────────────────────────────────
     def get_quote(self, symbol: str, token: Optional[str] = None) -> float:
-        """
-        Fetch real-time last traded price for a symbol using quote_data.
-        Returns 0.0 if unavailable.
-        """
-        if not self.is_available(token=token):
+        sec_id, seg = self.resolve(symbol)
+        if not sec_id:
             return 0.0
-
-        sec_id, exchange_segment = self.resolve(symbol)
-        if sec_id is None:
-            return 0.0
-
-        client = self._make_client(token) if token else self._get_client()
-        if client is None:
-            return 0.0
-
         try:
-            # quote_data expects {exchange_segment: [security_id_int]}
-            sec_id_int = int(sec_id)
-            response = client.quote_data({exchange_segment: [sec_id_int]})
-            # Response structure: {"data": {"NSE_EQ": {str(sec_id): {..., "last_price": ...}}}}
-            data = response.get("data", {})
-            seg_data = data.get(exchange_segment, {})
-            entry = seg_data.get(str(sec_id_int), seg_data.get(sec_id, {}))
-            ltp = entry.get("last_price") or entry.get("ltp") or entry.get("LTP")
-            if ltp is not None and float(ltp) > 0:
-                return round(float(ltp), 2)
+            client = self._get_client(token)
+            data = self._unwrap(client.ticker_data({seg: [int(sec_id)]}))
+            # v2 shape: {"data": {"NSE_EQ": {"2885": {"last_price": …}}}, "status": "success"}
+            inner = data.get("data", data)
+            entry = (inner.get(seg) or {}).get(str(sec_id)) or {}
+            ltp = entry.get("last_price") or entry.get("LTP")
+            return round(float(ltp), 2) if ltp else 0.0
+        except DhanError as e:
+            logger.debug(f"Dhan quote failed for {symbol}: {e}")
+            return 0.0
         except Exception as e:
-            logger.debug(f"Dhan get_quote failed for {symbol}: {e}")
+            logger.debug(f"Dhan quote error for {symbol}: {e}")
+            return 0.0
 
-        return 0.0
-
-    # ─────────────────────── Internal helpers ───────────────────────────────
-
-    def _parse_response(self, response: dict, interval: str) -> pd.DataFrame:
-        """
-        Convert the dhanhq API response dict into a DataFrame with the standard
-        OHLCV column names and a DatetimeIndex.
-        """
+    def context(self):
+        """DhanContext for the WebSocket feed (None if unavailable)."""
+        cid, tok = self._creds()
+        if not (cid and tok):
+            return None
         try:
-            if not response or not isinstance(response, dict):
-                return pd.DataFrame()
-
-            opens = response.get("open", [])
-            highs = response.get("high", [])
-            lows = response.get("low", [])
-            closes = response.get("close", [])
-            volumes = response.get("volume", [])
-            timestamps = response.get("timestamp", [])
-
-            if not closes or not timestamps:
-                return pd.DataFrame()
-
-            # Align lengths (defensive)
-            min_len = min(len(opens), len(highs), len(lows), len(closes), len(volumes), len(timestamps))
-            if min_len == 0:
-                return pd.DataFrame()
-
-            df = pd.DataFrame({
-                "Open": opens[:min_len],
-                "High": highs[:min_len],
-                "Low": lows[:min_len],
-                "Close": closes[:min_len],
-                "Volume": volumes[:min_len],
-            })
-
-            # Parse timestamps — Dhan returns Unix epoch integers or ISO strings
-            ts_raw = timestamps[:min_len]
-            try:
-                ts_series = pd.to_datetime(ts_raw, unit="s", utc=True).tz_convert("Asia/Kolkata").tz_localize(None)
-            except Exception:
-                try:
-                    ts_series = pd.to_datetime(ts_raw)
-                except Exception:
-                    ts_series = pd.RangeIndex(min_len)
-
-            df.index = ts_series
-            df.index.name = "Date"
-            df = df.astype(float)
-            df["Volume"] = df["Volume"].astype(int)
-            df = df.sort_index()
-
-            return df
-
-        except Exception as e:
-            logger.debug(f"Dhan response parse error: {e}")
-            return pd.DataFrame()
+            from dhanhq import DhanContext  # type: ignore
+            return DhanContext(str(cid), str(tok))
+        except Exception:
+            return None
 
 
-# ── Module-level singleton ───────────────────────────────────────────────────
 dhan_data_service = DhanDataService()

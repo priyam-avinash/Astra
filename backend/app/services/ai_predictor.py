@@ -18,118 +18,35 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
-import requests
-import yfinance as yf
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import warnings
 
-# ── In-memory OHLCV data cache (TTL = 4 hours) ───────────────────────────────
-_DATA_CACHE: dict = {}   # key: "SYMBOL|interval" → (pd.DataFrame, datetime)
-_DATA_CACHE_TTL = 14400  # 4 hours in seconds
+from app.services.market_data import market_data, normalize_symbol
+
+# ── Back-compat shims ────────────────────────────────────────────────────────
+# Older modules import these helpers. All data now flows through
+# app.services.market_data (provider chain + caching + health tracking).
 
 def cache_get(symbol: str, interval: str):
-    key = f"{symbol}|{interval}"
-    entry = _DATA_CACHE.get(key)
-    if entry:
-        df, ts = entry
-        if (datetime.now() - ts).total_seconds() < _DATA_CACHE_TTL:
-            return df
+    df = market_data.get_ohlcv(symbol, period="1y", interval=interval)
+    return None if df.empty else df
+
+def cache_put(symbol: str, df, interval: str):   # no-op: market_data caches itself
     return None
-
-def cache_put(symbol: str, df, interval: str):
-    _DATA_CACHE[f"{symbol}|{interval}"] = (df, datetime.now())
-
-# ── Real-time price cache (TTL = 60s) — stops /api/positions from hammering ──
-_PRICE_CACHE: dict = {}   # key: symbol → (price: float, datetime)
-_PRICE_CACHE_TTL = 60
 
 def _price_cache_get(symbol: str):
-    entry = _PRICE_CACHE.get(symbol)
-    if entry:
-        price, ts = entry
-        if (datetime.now() - ts).total_seconds() < _PRICE_CACHE_TTL:
-            return price
-    return None
+    info = market_data._price.get(normalize_symbol(symbol))
+    return info[0] if info else None
 
 def _price_cache_put(symbol: str, price: float):
-    _PRICE_CACHE[symbol] = (price, datetime.now())
-
-# ── AV working-format cache — avoids retrying dead symbol formats ─────────────
-_AV_FORMAT_CACHE: dict = {}  # key: symbol → best AV symbol string
-
-# ── Hard-timeout wrapper + circuit breaker for yfinance ─────────────────────
-# yfinance ignores its own timeout parameter when DNS is down; we wrap every
-# call in a daemon thread and abandon after timeout_sec. A circuit breaker
-# tracks consecutive failures and skips yfinance entirely for COOLDOWN_SEC
-# after _CB_THRESHOLD failures, preventing thread-pool exhaustion.
-_YF_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="yf_safe")
-_YF_CB_FAILURES   = 0          # consecutive failure counter
-_YF_CB_TRIPPED_AT = None       # when the breaker tripped
-_YF_CB_THRESHOLD  = 1          # trip after first failure
-_YF_CB_COOLDOWN   = 300        # seconds to stay open (5 min)
-
-def _preflight_yf_check():
-    """On startup: test Yahoo DNS in 2s. If unreachable, pre-trip the circuit breaker."""
-    global _YF_CB_FAILURES, _YF_CB_TRIPPED_AT
-    import socket, logging as _logging
-    _log = _logging.getLogger(__name__)
-    try:
-        socket.setdefaulttimeout(2)
-        socket.getaddrinfo("query2.finance.yahoo.com", 443)
-        socket.setdefaulttimeout(None)
-        _log.info("✅ Yahoo Finance DNS reachable — yfinance enabled")
-    except Exception:
-        socket.setdefaulttimeout(None)
-        _YF_CB_FAILURES = _YF_CB_THRESHOLD
-        _YF_CB_TRIPPED_AT = datetime.now()
-        _log.warning("⚡ Yahoo Finance DNS unreachable at startup — circuit breaker pre-tripped; using Alpha Vantage only")
-
-_preflight_yf_check()
-
-def _yf_circuit_open() -> bool:
-    """Return True if the circuit breaker is open (yfinance should be skipped)."""
-    global _YF_CB_TRIPPED_AT
-    if _YF_CB_TRIPPED_AT is None:
-        return False
-    elapsed = (datetime.now() - _YF_CB_TRIPPED_AT).total_seconds()
-    if elapsed > _YF_CB_COOLDOWN:
-        # Reset after cooldown
-        _YF_CB_TRIPPED_AT = None
-        return False
-    return True
-
-def _yf_record_failure():
-    global _YF_CB_FAILURES, _YF_CB_TRIPPED_AT
-    _YF_CB_FAILURES += 1
-    if _YF_CB_FAILURES >= _YF_CB_THRESHOLD and _YF_CB_TRIPPED_AT is None:
-        _YF_CB_TRIPPED_AT = datetime.now()
-        logger.warning(f"⚡ yfinance circuit breaker OPEN after {_YF_CB_FAILURES} failures — "
-                       f"skipping yfinance for {_YF_CB_COOLDOWN}s")
-
-def _yf_record_success():
-    global _YF_CB_FAILURES, _YF_CB_TRIPPED_AT
-    _YF_CB_FAILURES = 0
-    _YF_CB_TRIPPED_AT = None
+    market_data.put_live_price(symbol, price, "cache")
 
 def _yf_download_safe(symbol, period, interval, timeout_sec=5, **kwargs):
-    """Run yf.download in a thread; abandon after timeout_sec; update circuit breaker."""
-    if _yf_circuit_open():
-        return pd.DataFrame()
-    future = _YF_EXECUTOR.submit(
-        yf.download, symbol, period=period, interval=interval,
-        auto_adjust=True, progress=False, **kwargs
-    )
-    try:
-        result = future.result(timeout=timeout_sec)
-        if result is not None and not result.empty:
-            _yf_record_success()
-        else:
-            _yf_record_failure()
-        return result if result is not None else pd.DataFrame()
-    except (FuturesTimeoutError, Exception):
-        _yf_record_failure()
-        return pd.DataFrame()
+    """Deprecated: kept for callers that still import it. Uses market_data."""
+    return market_data.get_ohlcv(symbol, period=period, interval=interval)
+
+def _yf_circuit_open() -> bool:
+    return False
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -163,21 +80,20 @@ def _get_luong_attention_cls():
     if _LUONG_ATTENTION_CLS is not None:
         return _LUONG_ATTENTION_CLS
 
-    import tensorflow as tf
+    import keras  # Keras 3 (tf.keras may resolve to the legacy Keras 2 shim)
 
-    @tf.keras.saving.register_keras_serializable(package="astra")
-    class LuongAttention(tf.keras.layers.Layer):
+    @keras.saving.register_keras_serializable(package="astra")
+    class LuongAttention(keras.layers.Layer):
         """Dot-product attention over LSTM timesteps -> context vector."""
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            self.score_dense = tf.keras.layers.Dense(1, use_bias=False)
+            self.score_dense = keras.layers.Dense(1, use_bias=False)
 
         def call(self, hidden_states):
             # hidden_states: (batch, timesteps, features)
-            score = self.score_dense(hidden_states)          # (batch, timesteps, 1)
-            weights = tf.nn.softmax(score, axis=1)           # (batch, timesteps, 1)
-            context = tf.reduce_sum(weights * hidden_states, axis=1)  # (batch, features)
-            return context
+            score = self.score_dense(hidden_states)                       # (batch, timesteps, 1)
+            weights = keras.ops.softmax(score, axis=1)                    # (batch, timesteps, 1)
+            return keras.ops.sum(weights * hidden_states, axis=1)         # (batch, features)
 
     _LUONG_ATTENTION_CLS = LuongAttention
     return LuongAttention
@@ -206,234 +122,68 @@ class AIPredictionEngine:
             scaler_path = os.path.join(MODELS_DIR, "astra_lstm_equity_scaler.joblib")
             if os.path.exists(lstm_path) and os.path.exists(scaler_path):
                 try:
-                    import tensorflow as tf
                     # Register the custom attention layer before loading so Keras
-                    # can reconstruct it (otherwise load_model raises on the layer).
+                    # can reconstruct it; older files with a Lambda layer go through
+                    # the compat loader (see services/model_compat.py).
+                    from app.services.model_compat import load_keras_model
                     luong_cls = _get_luong_attention_cls()
-                    self.lstm_model = tf.keras.models.load_model(
-                        lstm_path, custom_objects={"LuongAttention": luong_cls}
-                    )
+                    self.lstm_model = load_keras_model(
+                        lstm_path, custom_objects={"LuongAttention": luong_cls})
                     self.lstm_scaler = joblib.load(scaler_path)
                     logger.info("Loaded ASTRA.ML (Bidirectional LSTM) model.")
                 except ImportError:
                     logger.warning("TensorFlow not installed. ASTRA.ML (LSTM) disabled.")
+                except Exception as e:
+                    logger.error(f"ASTRA.ML model failed to load ({e}); engine falls back to rules. "
+                                 "Retrain with: python train_models.py")
         except Exception as e:
             logger.error(f"Failed to load AI models: {e}")
 
     # ─────────────────────── MACRO FILTER ───────────────────────
 
     def _is_macro_bullish(self) -> bool:
-        """Check if NIFTY 50 is above its 200 SMA — only allow BUY in bull regime."""
+        """NIFTY 50 above its 200-day SMA → bull regime (BUYs allowed). Cached 1h."""
         now = datetime.now()
         if self.macro_trend_updated and (now - self.macro_trend_updated).total_seconds() < 3600:
             return self.macro_trend_bullish
-        try:
-            df = _yf_download_safe("^NSEI", period="1y", interval="1d", timeout_sec=5)
-            if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                lp = float(df.iloc[-1]["Close"])
-                s200 = float(df["Close"].rolling(200).mean().iloc[-1])
-                self.macro_trend_bullish = lp > s200
-                self.macro_trend_updated = now
-                logger.info(f"Macro trend: NIFTY @ {lp:.0f} vs SMA200 @ {s200:.0f} → {'BULL' if self.macro_trend_bullish else 'BEAR'}")
-        except Exception:
-            pass
+        df = market_data.get_ohlcv("^NSEI", period="2y", interval="1d")
+        if len(df) >= 200:
+            lp = float(df["Close"].iloc[-1])
+            s200 = float(df["Close"].rolling(200).mean().iloc[-1])
+            self.macro_trend_bullish = lp > s200
+            self.macro_trend_updated = now
+            logger.info(f"Macro trend: NIFTY @ {lp:.0f} vs SMA200 @ {s200:.0f} → "
+                        f"{'BULL' if self.macro_trend_bullish else 'BEAR'} [{df.attrs.get('source')}]")
+        else:
+            logger.warning("Macro trend: NIFTY data unavailable — keeping last known regime")
         return self.macro_trend_bullish
 
     def _get_weekly_trend(self, symbol: str) -> str:
-        """
-        Multi-timeframe filter: check weekly chart trend for a symbol.
-        Returns 'BULL', 'BEAR', or 'NEUTRAL'.
-        Cached per symbol for 4 hours (weekly bars don't change intraday).
-        """
-        cache_key = f"_weekly_{symbol}"
-        cached = getattr(self, "_weekly_cache", {})
+        """Weekly-chart trend filter → 'BULL' | 'BEAR' | 'NEUTRAL' (cached 4h)."""
+        cache = self.__dict__.setdefault("_weekly_cache", {})
         now = datetime.now()
-        if cache_key in cached:
-            result, ts = cached[cache_key]
-            if (now - ts).total_seconds() < 14400:  # 4-hour TTL
-                return result
-        try:
-            df_w = _yf_download_safe(symbol, period="2y", interval="1wk", timeout_sec=5)
-            if df_w is not None and not df_w.empty and len(df_w) >= 30:
-                if isinstance(df_w.columns, pd.MultiIndex):
-                    df_w.columns = df_w.columns.get_level_values(0)
-                close = df_w["Close"]
-                sma30w = close.rolling(30).mean().iloc[-1]
-                sma10w = close.rolling(10).mean().iloc[-1]
-                lp = float(close.iloc[-1])
-                if lp > float(sma30w) and float(sma10w) > float(sma30w):
-                    trend = "BULL"
-                elif lp < float(sma30w) and float(sma10w) < float(sma30w):
-                    trend = "BEAR"
-                else:
-                    trend = "NEUTRAL"
-                if not hasattr(self, "_weekly_cache"):
-                    self._weekly_cache = {}
-                self._weekly_cache[cache_key] = (trend, now)
-                logger.info(f"Weekly trend {symbol}: {trend} (price={lp:.2f} vs SMA30w={sma30w:.2f})")
-                return trend
-        except Exception as e:
-            logger.debug(f"Weekly trend check failed for {symbol}: {e}")
-        # Cache NEUTRAL to avoid repeated failing calls for 4 hours
-        if not hasattr(self, "_weekly_cache"):
-            self._weekly_cache = {}
-        self._weekly_cache[cache_key] = ("NEUTRAL", now)
-        return "NEUTRAL"
+        hit = cache.get(symbol)
+        if hit and (now - hit[1]).total_seconds() < 14400:
+            return hit[0]
+        trend = "NEUTRAL"
+        df_w = market_data.get_ohlcv(symbol, period="2y", interval="1wk")
+        if len(df_w) >= 30:
+            close = df_w["Close"]
+            sma30w = float(close.rolling(30).mean().iloc[-1])
+            sma10w = float(close.rolling(10).mean().iloc[-1])
+            lp = float(close.iloc[-1])
+            if lp > sma30w and sma10w > sma30w:
+                trend = "BULL"
+            elif lp < sma30w and sma10w < sma30w:
+                trend = "BEAR"
+            cache[symbol] = (trend, now)
+        return trend
 
     # ─────────────────────── DATA FETCHING ───────────────────────
 
     def _fetch_data(self, symbol: str, period: str = "6mo", interval: str = "1d") -> pd.DataFrame:
-        """
-        Fetch OHLCV data with cache + multi-source fallback chain.
-        Source priority:
-          0. In-memory cache (4-hour TTL)
-          1. Twelve Data (800 req/day free — best quality, supports Indian stocks)
-          2. Alpha Vantage (25 req/day — reliable backup, tries bare/BSE/NSE formats)
-          3. yfinance primary (hard-capped 5s thread + circuit breaker)
-          4. yfinance with .NS suffix
-          5. CIRCUIT BREAKER — no synthetic fallback
-        """
-        # 0. Cache hit — skip all API calls
-        cached = cache_get(symbol, interval)
-        if cached is not None:
-            logger.debug(f"Cache hit for {symbol} [{interval}]")
-            return cached
-
-        # 0.5. Dhan HQ (primary — unlimited, native NSE/BSE, no rate limits)
-        try:
-            from app.services.dhan_data import dhan_data_service
-            if dhan_data_service.is_available():
-                df_dhan = dhan_data_service.get_ohlcv(symbol, period=period, interval=interval)
-                if df_dhan is not None and not df_dhan.empty and len(df_dhan) > 20:
-                    cache_put(symbol, df_dhan, interval)
-                    logger.info(f"Dhan feed OK for {symbol}: {len(df_dhan)} bars [{interval}]")
-                    return df_dhan
-        except Exception as e:
-            logger.debug(f"Dhan data unavailable: {e}")
-
-        # Determine if we need extended history (>100 days)
-        need_full = period in ["1y", "2y", "5y", "max", "2mo", "3mo", "6mo"]
-
-        # 1. Twelve Data (800 free req/day)
-        #    Free tier covers: US stocks, crypto, and some international listings.
-        #    Pure NSE-only symbols (RELIANCE, TCS) return 404 on free plan — skip them
-        #    to avoid wasting a quota request. Crypto needs "-" → "/" conversion.
-        td_key = os.getenv("TWELVE_DATA_KEY", "")
-        if td_key and interval == "1d":
-            try:
-                is_crypto_sym = "-USD" in symbol or "-BTC" in symbol or "-ETH" in symbol
-                is_pure_nse   = ".NS" in symbol  # NSE-suffixed symbols need paid plan
-                if not is_pure_nse:              # Only attempt for non-NSE symbols
-                    td_symbol = symbol.replace("-", "/") if is_crypto_sym else symbol.replace(".NS", "")
-                    size_map  = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
-                    outputsize = size_map.get(period, 180)
-                    url = (
-                        f"https://api.twelvedata.com/time_series?symbol={td_symbol}"
-                        f"&interval=1day&outputsize={outputsize}&apikey={td_key}&format=JSON"
-                    )
-                    res = requests.get(url, timeout=8)
-                    data = res.json()
-                    if "values" in data and len(data["values"]) > 20:
-                        df_td = pd.DataFrame(data["values"])
-                        df_td["datetime"] = pd.to_datetime(df_td["datetime"])
-                        df_td = df_td.set_index("datetime").sort_index()
-                        df_td = df_td.rename(columns={"open": "Open", "high": "High",
-                                                       "low": "Low", "close": "Close",
-                                                       "volume": "Volume"})
-                        df_td = df_td[["Open", "High", "Low", "Close", "Volume"]].astype(float)
-                        cache_put(symbol, df_td, interval)
-                        logger.info(f"Twelve Data feed OK for {symbol}: {len(df_td)} bars")
-                        return df_td
-            except Exception as e:
-                logger.debug(f"Twelve Data unavailable: {e}")
-
-        # 2. Alpha Vantage — free tier only supports 'compact' (100 bars); 'full' requires premium
-        try:
-            av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
-            bare = symbol.replace(".NS", "").replace(".BSE", "").split("-")[0]
-            # Try the format that worked last time first, then fall back to all candidates.
-            # Order: preferred (cached) → bare.BSE (works for Indian stocks) → bare (US stocks)
-            # Skip bare.NSE — Alpha Vantage returns empty results for .NSE format.
-            preferred = _AV_FORMAT_CACHE.get(symbol)
-            av_candidates = [preferred] if preferred else []
-            for fmt in [bare + ".BSE", bare]:  # .BSE first — works for NSE-listed Indian stocks
-                if fmt not in av_candidates:
-                    av_candidates.append(fmt)
-            for av_sym in av_candidates:
-                try:
-                    url = (
-                        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                        f"&symbol={av_sym}&apikey={av_key}&outputsize=compact"
-                    )
-                    res = requests.get(url, timeout=8)
-                    data = res.json()
-                    if "Time Series (Daily)" in data:
-                        ts = data["Time Series (Daily)"]
-                        df_av = pd.DataFrame.from_dict(ts, orient="index")
-                        df_av = df_av.rename(columns={
-                            "1. open": "Open", "2. high": "High",
-                            "3. low": "Low", "4. close": "Close", "5. volume": "Volume"
-                        })
-                        df_av.index = pd.to_datetime(df_av.index)
-                        df_av = df_av.astype(float).sort_index()
-                        if len(df_av) > 20:
-                            _AV_FORMAT_CACHE[symbol] = av_sym  # Remember working format
-                            logger.info(f"AlphaVantage feed OK for {symbol} (as {av_sym}): {len(df_av)} bars")
-                            cache_put(symbol, df_av, interval)
-                            return df_av
-                except Exception:
-                    continue
-        except Exception as e:
-            logger.debug(f"AlphaVantage unavailable: {e}")
-
-        # 3. Yahoo Finance direct (custom UA — bypasses yfinance library DNS issues)
-        try:
-            from app.services.yahoo_finance import yahoo_service
-            # Build proper .NS symbol for Indian stocks
-            yf_sym = symbol
-            if not any(x in symbol for x in [".NS", ".BSE", "-USD", "-INR", "^", "="]):
-                yf_sym = symbol + ".NS"
-            df_yf = yahoo_service.get_ohlcv(yf_sym, period=period, interval=interval)
-            if df_yf is not None and not df_yf.empty and len(df_yf) > 20:
-                cache_put(symbol, df_yf, interval)
-                logger.info(f"Yahoo direct OK for {symbol} ({yf_sym}): {len(df_yf)} bars [{interval}]")
-                return df_yf
-        except Exception as e:
-            logger.debug(f"Yahoo direct failed for {symbol}: {e}")
-
-        # 3b. NSE India direct OHLCV — free, no key, daily bars only, Indian stocks
-        #     Used when Yahoo is rate-limited (429). Requires session warmup.
-        if interval == "1d":
-            try:
-                from app.services.yahoo_finance import get_nse_ohlcv
-                # Map period string to approximate calendar days
-                _days_map = {"1mo": 45, "3mo": 100, "6mo": 200, "1y": 380, "2y": 740, "5y": 1850}
-                nse_days = _days_map.get(period, 200)
-                df_nse = get_nse_ohlcv(symbol, days=nse_days)
-                if df_nse is not None and not df_nse.empty and len(df_nse) > 20:
-                    cache_put(symbol, df_nse, interval)
-                    logger.info(f"NSE direct OHLCV OK for {symbol}: {len(df_nse)} bars")
-                    return df_nse
-            except Exception as e:
-                logger.debug(f"NSE direct OHLCV failed for {symbol}: {e}")
-
-        # 4. yfinance library (last resort — circuit-breaker protected)
-        try:
-            df = _yf_download_safe(symbol, period=period, interval=interval, timeout_sec=5)
-            if df is not None and not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                if len(df) > 20:
-                    cache_put(symbol, df, interval)
-                    return df
-        except Exception:
-            pass
-
-        # 5. Data exhaust - all sources failed
-        logger.warning(f"⚠️  Data fetch exhausted for {symbol}. Proceeding with empty set.")
-        return pd.DataFrame()
+        """OHLCV via the unified market-data layer (see services/market_data.py)."""
+        return market_data.get_ohlcv(symbol, period=period, interval=interval)
 
     # ─────────────────────── INDICATOR LIBRARY ───────────────────────
 
@@ -689,10 +439,13 @@ class AIPredictionEngine:
             if df_raw.empty:
                 return {
                     "asset": asset_symbol, "signal": "HOLD", "confidence": 0.0,
-                    "error": "Real-time data currently unavailable from all sources.",
+                    "error": ("No market data available from any provider. "
+                              "Check GET /api/data/health for the reason (network, keys, quota)."),
                     "current_price": 0.0, "entry_price": 0.0, "target": 0.0, "stop_loss": 0.0,
-                    "chartData": []
+                    "chartData": [], "data_source": None, "data_stale": True,
                 }
+            data_source = df_raw.attrs.get("source")
+            data_stale = bool(df_raw.attrs.get("stale"))
 
             df = self._compute_features(df_raw)
             if len(df) < 5:
@@ -809,9 +562,16 @@ class AIPredictionEngine:
             # ── Build chart data (last 180 bars) ──
             chart_data = []
             used_times = set()
+            intraday = interval not in ("1d", "1wk", "1mo")
             for idx, row in df.tail(180).iterrows():
                 try:
-                    t_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+                    # Daily: "YYYY-MM-DD". Intraday: epoch seconds of exchange-local
+                    # wall time (lightweight-charts renders it as-is), so bars
+                    # within one day are no longer collapsed into a single point.
+                    if intraday:
+                        t_str = int(pd.Timestamp(idx).tz_localize(None).timestamp()) if getattr(idx, "tzinfo", None) else int(pd.Timestamp(idx).timestamp())
+                    else:
+                        t_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
                 except Exception:
                     t_str = str(idx)[:10]
                 if t_str in used_times:
@@ -845,11 +605,9 @@ class AIPredictionEngine:
             # Prices are cached for up to 60 seconds; OHLCV bars (indicators) are
             # cached for up to 4 hours. Entry/SL/TP prices shown are the BEST
             # AVAILABLE cached price — always verify live price before executing.
-            _cache_hit = cache_get(asset_symbol, interval) is not None
             data_freshness_note = (
-                "⚠️  Data Rate-Limit Notice: To preserve API quotas, prices are cached up to 60 s "
-                "and OHLCV bars up to 4 h. Entry / SL / TP levels shown are indicative — "
-                "always confirm the live market price before executing any trade."
+                "Stale data: live providers unreachable, showing last cached bars." if data_stale else
+                "Indicative levels from latest bars — confirm the live price before acting."
             )
 
             return {
@@ -874,8 +632,10 @@ class AIPredictionEngine:
                 "engine": engine,
                 "chartData": chart_data,
                 "data_freshness_note": data_freshness_note,
-                "price_cache_ttl_sec": 60,
-                "ohlcv_cache_ttl_hr": 4,
+                "data_source": data_source,
+                "data_stale": data_stale,
+                "bars": int(len(df_raw)),
+                "last_bar": str(df_raw.index[-1]),
             }
 
         except Exception as e:
@@ -887,106 +647,8 @@ class AIPredictionEngine:
             }
 
     def get_realtime_price(self, symbol: str) -> float:
-        # 0. DhanFeed live price (sub-second, if WebSocket is connected)
-        try:
-            from app.services.dhan_feed import dhan_feed_manager
-            live = dhan_feed_manager.get_price(symbol)
-            if live and live > 0:
-                _price_cache_put(symbol, live)
-                return live
-        except Exception:
-            pass
-
-        # 0.5. Price cache (60s TTL) — prevents /api/positions from firing on every poll
-        cached_price = _price_cache_get(symbol)
-        if cached_price is not None:
-            return cached_price
-
-        # 1. NSE India direct (live quote, no auth, no key)
-        try:
-            from app.services.yahoo_finance import get_nse_quote
-            clean_sym = symbol.replace(".NS", "").replace(".BSE", "")
-            if not any(x in symbol for x in ["-USD", "-INR", "^", "="]):
-                nse_data = get_nse_quote(clean_sym)
-                ltp = nse_data.get("lastPrice", 0.0)
-                if ltp and float(ltp) > 0:
-                    p = round(float(ltp), 2)
-                    _price_cache_put(symbol, p)
-                    return p
-        except Exception:
-            pass
-
-        # 1b. Yahoo Finance direct (live price via v8 chart, 1m bar)
-        try:
-            from app.services.yahoo_finance import yahoo_service
-            yf_sym = symbol if any(x in symbol for x in [".NS", ".BSE", "-USD", "^", "="]) else symbol + ".NS"
-            p = yahoo_service.get_quote(yf_sym)
-            if p > 0:
-                _price_cache_put(symbol, p)
-                return p
-        except Exception:
-            pass
-
-        # 1c. yfinance library (last resort — circuit-breaker protected)
-        if not _yf_circuit_open():
-            try:
-                def _yf_price():
-                    ticker = yf.Ticker(symbol)
-                    fast = ticker.fast_info
-                    price = getattr(fast, "last_price", None) or fast.get("lastPrice")
-                    if price and float(price) > 0:
-                        return round(float(price), 2)
-                    df = ticker.history(period="1d")
-                    if not df.empty:
-                        return round(float(df.iloc[-1]["Close"]), 2)
-                    return None
-                future = _YF_EXECUTOR.submit(_yf_price)
-                result = future.result(timeout=5)
-                if result:
-                    _yf_record_success()
-                    _price_cache_put(symbol, result)
-                    return result
-                _yf_record_failure()
-            except Exception:
-                _yf_record_failure()
-
-        # 2. Fallback: use latest close from cached/fetched data
-        try:
-            df = self._fetch_data(symbol, period="1mo", interval="1d")
-            if not df.empty:
-                p = round(float(df.iloc[-1]["Close"]), 2)
-                _price_cache_put(symbol, p)
-                return p
-        except Exception:
-            pass
-
-        # 3. Alpha Vantage GLOBAL_QUOTE for real-time price
-        try:
-            av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
-            bare = symbol.replace(".NS", "").replace(".BSE", "").split("-")[0]
-            preferred = _AV_FORMAT_CACHE.get(symbol)
-            av_syms = [preferred] if preferred else []
-            for fmt in [bare, bare + ".BSE"]:
-                if fmt not in av_syms:
-                    av_syms.append(fmt)
-            for av_sym in av_syms:
-                try:
-                    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={av_sym}&apikey={av_key}"
-                    res = requests.get(url, timeout=6)
-                    data = res.json()
-                    gq = data.get("Global Quote", {})
-                    price_str = gq.get("05. price", "")
-                    if price_str:
-                        p = round(float(price_str), 2)
-                        if p > 0:
-                            _price_cache_put(symbol, p)
-                            return p
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        return 0.0
+        """Last traded price (Dhan WS → Dhan → Binance → Yahoo → last close). 0.0 if unknown."""
+        return market_data.get_quote(symbol)
 
     # ─────────────────────── MODEL TRAINING HELPERS ───────────────────────
 

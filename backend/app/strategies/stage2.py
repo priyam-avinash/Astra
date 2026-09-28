@@ -149,17 +149,11 @@ def _load_nifty_regime() -> Optional[pd.DataFrame]:
     global _NIFTY_REGIME
     if _NIFTY_REGIME is not None:
         return _NIFTY_REGIME
-    # Use yf.download() directly — avoids yahoo_service retry/backoff hanging
+    # v1.13: shared market-data layer (fast-failing, cached)
     try:
-        import yfinance as yf
-        raw = yf.download(
-            "^NSEI", period="2y", interval="1d",
-            auto_adjust=True, progress=False, threads=False
-        )
-        if raw is not None and not raw.empty and len(raw) >= SMA_PERIOD + 30:
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
-            raw.index = pd.to_datetime(raw.index).tz_localize(None)
+        from app.services.market_data import market_data
+        raw = market_data.get_ohlcv("^NSEI", period="2y", interval="1d")
+        if len(raw) >= SMA_PERIOD + 30:
             df = raw[["Close"]].sort_index().copy()
             df["SMA"] = df["Close"].rolling(SMA_PERIOD).mean()
             _NIFTY_REGIME = df

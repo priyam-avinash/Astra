@@ -1,6 +1,20 @@
 """
 ASTRA pytest fixtures shared across the test suite.
 """
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+# v1.13: isolated SQLite DB, no background monitor, no real keys during tests
+_tmp = tempfile.mkdtemp(prefix="astra_test_")
+os.environ["DATABASE_URL"] = f"sqlite:///{Path(_tmp) / 'test.db'}"
+os.environ["ASTRA_INPROCESS_MONITOR"] = "false"
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+for _k in ("TWELVE_DATA_KEY", "ALPHA_VANTAGE_API_KEY", "ALPHA_VANTAGE_KEY", "DHAN_CLIENT_ID",
+           "DHAN_ACCESS_TOKEN", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "UPSTOX_ACCESS_TOKEN"):
+    os.environ[_k] = ""
+
 
 import os
 import random

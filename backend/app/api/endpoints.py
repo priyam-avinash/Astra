@@ -178,36 +178,25 @@ class TradeAction(BaseModel):
 
 @router.get("/api/signals")
 def get_ai_signals(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Signals are only actionable for a short while — expire anything older
+    # than SIGNAL_TTL_HOURS (this also clears the fake demo signals v1.12 seeded).
+    from datetime import timedelta
+    ttl_h = float(os.getenv("SIGNAL_TTL_HOURS", "24"))
+    cutoff = datetime.utcnow() - timedelta(hours=ttl_h)
+    stale_q = db.query(TargetSignal).filter(
+        TargetSignal.status == "Pending Approval",
+        TargetSignal.user_id == current_user.id,
+        TargetSignal.created_at < cutoff,
+    )
+    if stale_q.count():
+        stale_q.update({TargetSignal.status: "Expired"}, synchronize_session=False)
+        db.commit()
     signals = db.query(TargetSignal).filter(
         TargetSignal.status == "Pending Approval",
         TargetSignal.user_id == current_user.id
     ).all()
-    if not signals:
-        # Seed mock AI signals — entry_price and target_price are DIFFERENT values
-        # BUY:  target > entry  (profit when price rises)
-        # SELL: target < entry  (profit when price falls)
-        mock_seeds = [
-            {"asset": "RELIANCE.NS", "type": "Equity",    "signal": "BUY",  "entry": 1480.0, "target": 1535.0, "stop_loss": 1410.0, "confidence": 74.2, "engine": "astra_ai"},
-            {"asset": "TCS.NS",      "type": "Equity",    "signal": "BUY",  "entry": 4050.0, "target": 4210.0, "stop_loss": 3870.0, "confidence": 68.5, "engine": "astra_ai"},
-            {"asset": "HDFCBANK.NS", "type": "Equity",    "signal": "SELL", "entry": 1580.0, "target": 1510.0, "stop_loss": 1645.0, "confidence": 61.0, "engine": "astra_ml"},
-            {"asset": "GC=F",        "type": "Commodity", "signal": "BUY",  "entry": 2720.0, "target": 2835.0, "stop_loss": 2640.0, "confidence": 71.3, "engine": "astra_ai"},
-            {"asset": "^NSEI",       "type": "F&O",       "signal": "HOLD", "entry": 23500.0,"target": 24400.0,"stop_loss": 22800.0,"confidence": 55.0, "engine": "astra"},
-        ]
-        for s in mock_seeds:
-            new_sig = TargetSignal(
-                user_id=current_user.id,
-                asset=s["asset"], type=s["type"], signal=s["signal"],
-                entry_price=s["entry"], target_price=s["target"],
-                stop_loss=s["stop_loss"], confidence=s["confidence"],
-                engine=s["engine"],
-            )
-            db.add(new_sig)
-        db.commit()
-        signals = db.query(TargetSignal).filter(
-            TargetSignal.status == "Pending Approval",
-            TargetSignal.user_id == current_user.id
-        ).all()
-
+    # v1.13: the queue is filled only by real analysis (Scanner → "Add to queue",
+    # or POST /api/signals). The old fake seed signals (hard-coded prices) are gone.
     return {"queue": [
         {
             "id":          s.id,
@@ -244,8 +233,8 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
     Returns fundamental financial data for a symbol using yfinance Ticker.info.
     Powers the Financials, Forecasts, and Overview tabs.
     """
-    import yfinance as yf
     import math
+    from app.services.market_data import market_data, normalize_symbol
     
     def safe(v):
         """Sanitize NaN/Inf values for JSON serialization."""
@@ -256,9 +245,7 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
         return v
     
     try:
-        sym = symbol.upper()
-        if "." not in sym and "^" not in sym and "=" not in sym:
-            sym = sym + ".NS"
+        sym = normalize_symbol(symbol)
 
         # ── Cache check (5-min TTL) ───────────────────────────────────────────
         _cache_entry = _FINANCIALS_CACHE.get(sym)
@@ -268,8 +255,12 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
                 logger.debug(f"Financials cache hit for {sym}")
                 return _cached_data
 
-        ticker = yf.Ticker(sym)
-        info = ticker.info or {}
+        info = market_data.get_fundamentals(sym)
+        if not info:
+            return {"symbol": symbol.upper(), "available": False,
+                    "error": "Fundamentals unavailable (Yahoo unreachable or no data for this symbol).",
+                    "profile": {"name": symbol.upper()}, "keyFacts": {}, "dividends": {},
+                    "growth": {}, "forecasts": {}}
         
         # Key facts
         key_facts = {
@@ -566,16 +557,18 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
             price=trade.price
         )
         
-        # 1. Create permanent trade record
+        fill_price = float(result.get("executed_price") or trade.price)
+
+        # 1. Create permanent trade record (at the actual paper fill, not the signal price)
         new_trade = TradeRecord(
             user_id=current_user.id,
             trade_id=result["order_id"],
             asset=trade.asset,
             action=trade.action,
-            price=trade.price,
+            price=fill_price,
             quantity=trade.quantity,
             pnl=0.0,
-            status="Executed (AI Signal)"
+            status="Executed (AI Signal · Paper)"
         )
         db.add(new_trade)
 
@@ -598,8 +591,8 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
         new_pos = ActivePosition(
             user_id=current_user.id,
             asset=trade.asset,
-            direction=trade.action,
-            entry_price=trade.price,
+            direction=trade.action.upper(),
+            entry_price=fill_price,
             quantity=trade.quantity,
             target_price=trade.target_price,
             stop_loss=trade.stop_loss,
@@ -611,6 +604,9 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
 
         db.commit()
         return result
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -625,6 +621,16 @@ class ManualTradeAction(BaseModel):
 
 @router.post("/api/execute/manual")
 def execute_manual_trade(trade: ManualTradeAction, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if _TRADING_HALTED:
+        raise HTTPException(status_code=503, detail="⛔ Trading is halted. Use /api/emergency/resume to re-enable.")
+    if trade.quantity < 1:
+        raise HTTPException(status_code=400, detail="Quantity must be at least 1.")
+    if trade.action.upper() not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="Action must be BUY or SELL.")
+    open_count = db.query(ActivePosition).filter(
+        ActivePosition.user_id == current_user.id, ActivePosition.status == "OPEN").count()
+    if open_count >= MAX_POSITIONS:
+        raise HTTPException(status_code=429, detail=f"Max {MAX_POSITIONS} concurrent positions reached.")
     try:
         result = broker_service.execute_trade(
             asset=trade.asset,
@@ -633,23 +639,24 @@ def execute_manual_trade(trade: ManualTradeAction, db: Session = Depends(get_db)
             price=trade.price
         )
         
+        fill_price = float(result.get("executed_price") or trade.price)
         new_trade = TradeRecord(
             user_id=current_user.id,
             trade_id=result["order_id"],
             asset=trade.asset,
             action=trade.action,
-            price=trade.price,
+            price=fill_price,
             quantity=trade.quantity,
             pnl=0.0,
-            status="Executed (Manual)"
+            status="Executed (Manual · Paper)"
         )
         db.add(new_trade)
 
         new_pos = ActivePosition(
             user_id=current_user.id,
             asset=trade.asset,
-            direction=trade.action,
-            entry_price=trade.price,
+            direction=trade.action.upper(),
+            entry_price=fill_price,
             quantity=trade.quantity,
             target_price=trade.target_price,
             stop_loss=trade.stop_loss,
@@ -659,6 +666,9 @@ def execute_manual_trade(trade: ManualTradeAction, db: Session = Depends(get_db)
 
         db.commit()
         return result
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -672,10 +682,12 @@ def get_active_positions(db: Session = Depends(get_db), current_user: User = Dep
     
     resp = []
     for p in positions:
-        # Get live price from the engine
-        current_price = ai_engine.get_realtime_price(p.asset)
-        if current_price == 0.0:
-            current_price = p.entry_price
+        # Live price (stale/cached prices are shown but never trigger exits)
+        from app.services.market_data import market_data
+        q = market_data.get_quote_info(p.asset)
+        current_price, price_stale = q["price"], q["stale"]
+        if current_price <= 0:
+            current_price, price_stale = p.entry_price, True
 
         # AUTO-EXIT CHECK
         triggered = False
@@ -691,7 +703,7 @@ def get_active_positions(db: Session = Depends(get_db), current_user: User = Dep
             elif p.stop_loss and current_price >= p.stop_loss:
                 triggered = True; exit_reason = "Stop Loss Hit"
 
-        if triggered:
+        if triggered and not price_stale:
             # Auto-square off
             p.status = "CLOSED"
             p.exit_price = current_price
@@ -729,7 +741,9 @@ def get_active_positions(db: Session = Depends(get_db), current_user: User = Dep
             "pnl": round(unrealized_pnl, 2),
             "pnl_pct": round((unrealized_pnl / (p.entry_price * p.quantity)) * 100, 2) if p.entry_price and p.quantity else 0,
             "time": p.entry_time.strftime("%H:%M:%S"),
-            "status": p.status
+            "status": p.status,
+            "price_source": q.get("source"),
+            "price_stale": price_stale,
         })
     return {"positions": resp}
 
@@ -779,6 +793,9 @@ def square_off_position(position_id: int, db: Session = Depends(get_db), current
         db.commit()
         
         return {"status": "success", "pnl": pnl, "exit_price": exit_price}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -1149,13 +1166,19 @@ def analyze_crypto(
 # ════════════════════════════════════════════════════════════════════════════
 
 # Settings keys that contain API keys (masked in GET responses)
-_SECRET_KEYS = {"anthropic_api_key", "groq_api_key"}
+_SECRET_KEYS = {"anthropic_api_key", "groq_api_key", "twelve_data_key",
+                "alpha_vantage_key", "dhan_access_token"}
 
 # All valid setting keys with their defaults
 _SETTING_DEFAULTS = {
     "llm_enabled":              "false",
     "anthropic_api_key":        "",
     "groq_api_key":             "",
+    # Market-data providers (optional — Yahoo/Binance/NSE need no key)
+    "twelve_data_key":          "",
+    "alpha_vantage_key":        "",
+    "dhan_client_id":           "",
+    "dhan_access_token":        "",
     "auto_execute_mode":        "advisory",   # advisory | auto
     "auto_execute_threshold":   "GREEN",      # GREEN | AMBER_GREEN
     "always_debate":            "false",
@@ -1186,6 +1209,13 @@ def get_settings(
     for key, default in _SETTING_DEFAULTS.items():
         raw_value = stored.get(key, default) or default
         result[key] = _mask(key, raw_value)
+
+    # Where each secret currently comes from: settings (DB) / env (.env) / missing
+    try:
+        from app.core.config import secret_source
+        result["key_sources"] = {k: secret_source(k) for k in _SECRET_KEYS | {"dhan_client_id"}}
+    except Exception:
+        pass
 
     # Append provider status from LLM router
     try:
@@ -1233,6 +1263,15 @@ def update_settings(
         lr._smart_router = None
     except Exception:
         pass
+
+    # New data-provider keys take effect immediately: clear cooldowns + caches
+    if any(k in updated for k in ("twelve_data_key", "alpha_vantage_key", "dhan_client_id", "dhan_access_token")):
+        try:
+            from app.services.market_data import HEALTH, market_data
+            HEALTH.reset()
+            market_data.clear_cache()
+        except Exception:
+            pass
 
     return {"updated": updated, "message": f"{len(updated)} setting(s) saved."}
 
@@ -1350,3 +1389,42 @@ def get_all_agent_memories(
         ],
     }
 
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  DATA-PROVIDER DIAGNOSTICS (v1.13)
+# ════════════════════════════════════════════════════════════════════════════
+
+@router.get("/api/data/health")
+def data_health(probe: bool = False, symbols: Optional[str] = None,
+                current_user: User = Depends(get_current_user)):
+    """
+    Status of every market-data provider (ok / cooldown / error / not_configured),
+    with the last error message. `?probe=true` actively tests each provider now.
+    """
+    from app.services.market_data import market_data
+    from app.services.dhan_feed import dhan_feed_manager
+    out = {"mode": "PAPER"}
+    if probe:
+        syms = [x.strip() for x in symbols.split(",")] if symbols else None
+        out["probe"] = market_data.probe(syms)
+    out.update(market_data.health())
+    out["dhan_feed"] = dhan_feed_manager.status()
+    out["last_sources"] = dict(list(market_data.last_source.items())[-25:])
+    return _sanitize(out)
+
+
+@router.post("/api/data/clear-cache")
+def data_clear_cache(symbol: Optional[str] = None, current_user: User = Depends(get_current_user)):
+    from app.services.market_data import market_data, HEALTH
+    market_data.clear_cache(symbol)
+    if not symbol:
+        HEALTH.reset()
+    return {"cleared": symbol or "all"}
+
+
+@router.get("/api/quote/{symbol}")
+def get_quote(symbol: str, current_user: User = Depends(get_current_user)):
+    from app.services.market_data import market_data, normalize_symbol
+    info = market_data.get_quote_info(symbol)
+    return {"symbol": normalize_symbol(symbol), **info}

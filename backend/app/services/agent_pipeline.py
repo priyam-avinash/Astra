@@ -230,11 +230,9 @@ class AgentPipeline:
         try:
             from app.services.fundamentals_scorer import fundamentals_scorer
             # Fetch financials inline
-            import yfinance as yf, math, warnings
-            warnings.filterwarnings("ignore")
-            sym = symbol if "." in symbol else symbol + ".NS"
-            ticker = yf.Ticker(sym)
-            info = ticker.info or {}
+            import math
+            from app.services.market_data import market_data
+            info = market_data.get_fundamentals(symbol)
 
             def safe(v):
                 if v is None: return None

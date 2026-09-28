@@ -42,7 +42,10 @@ def av_fallback_download(symbol: str) -> "pd.DataFrame":
     import pandas as pd
     import requests
     import os
-    av_key = os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ")
+    from app.core.config import get_secret
+    av_key = get_secret("alpha_vantage_key")
+    if not av_key:
+        return pd.DataFrame()
     # Map .NS symbols to AV format
     av_sym = symbol.replace(".NS", ".BSE").replace("^NSEI", "NSEI.BSE")
     url = (

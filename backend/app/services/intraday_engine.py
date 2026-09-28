@@ -42,239 +42,68 @@ _INTRADAY_CACHE_TTL = 300    # 5 minutes
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
+def _to_ist_session(df: pd.DataFrame) -> pd.DataFrame:
+    """tz-aware IST index, regular-session bars with volume only."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df.index = (df.index.tz_localize("Asia/Kolkata") if df.index.tz is None
+                else df.index.tz_convert("Asia/Kolkata"))
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    df = df.between_time("09:15", "15:30")
+    # Yahoo sometimes reports 0 volume on the forming bar — keep it, drop only all-zero days
+    if (df["Volume"] > 0).any():
+        df = df[(df["Volume"] > 0) | (df.index == df.index.max())]
+    return df
+
+
 def _fetch_intraday(symbol: str, days: int = 5) -> pd.DataFrame:
     """
-    Fetch 15-minute OHLCV bars for the last `days` trading days.
-
-    Priority:
-      1. Dhan HQ intraday_minute_data (native NSE, unlimited)
-      2. Alpha Vantage TIME_SERIES_INTRADAY (.BSE suffix)
-
-    Returns a cleaned DataFrame with timezone-aware IST index.
-    Symbol should be the bare NSE symbol (e.g. "RELIANCE"), .NS stripped internally.
+    Recent 15-minute bars (last `days` trading days) for an NSE symbol.
+    Source chain (via market_data): Dhan → Yahoo → yfinance → Twelve Data.
     """
-    # Normalise symbol — strip .NS suffix for Dhan, keep bare for AV lookup
+    from app.services.market_data import market_data
     clean = symbol.strip().replace(".NS", "").replace(".BSE", "").upper()
-
-    # ── Cache check ──────────────────────────────────────────────────────────
-    if clean in _INTRADAY_CACHE:
-        cached_df, cached_at = _INTRADAY_CACHE[clean]
-        age = (datetime.now() - cached_at).total_seconds()
-        if age < _INTRADAY_CACHE_TTL and not cached_df.empty:
-            return cached_df
-
-    df = pd.DataFrame()
-
-    # ── 1. Yahoo Finance direct (free, no key, 5-day 15m) ───────────────────
-    try:
-        from app.services.yahoo_finance import yahoo_service
-        yf_df = yahoo_service.get_ohlcv(f"{clean}.NS", period="5d", interval="15m")
-        if yf_df is not None and not yf_df.empty:
-            if yf_df.index.tz is None:
-                yf_df.index = yf_df.index.tz_localize("Asia/Kolkata")
-            else:
-                yf_df.index = yf_df.index.tz_convert("Asia/Kolkata")
-            yf_df = yf_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-            yf_df = yf_df[yf_df["Volume"] > 0]
-            if not yf_df.empty:
-                logger.info(f"[intraday] Yahoo 15m: {len(yf_df)} bars for {clean}")
-                df = yf_df
-    except Exception as e:
-        logger.debug(f"[intraday] Yahoo 15m fetch failed for {clean}: {e}")
-
-    # ── 2. Dhan HQ (requires daily session activation) ───────────────────────
-    if df.empty:
-        try:
-            from app.services.dhan_data import dhan_data_service
-            if dhan_data_service.is_available():
-                dhan_df = dhan_data_service.get_ohlcv(clean, period="1mo", interval="15m")
-                if not dhan_df.empty:
-                    if dhan_df.index.tz is None:
-                        dhan_df.index = dhan_df.index.tz_localize("Asia/Kolkata")
-                    else:
-                        dhan_df.index = dhan_df.index.tz_convert("Asia/Kolkata")
-                    cutoff = dhan_df.index[-1] - pd.Timedelta(days=days + 7)
-                    dhan_df = dhan_df[dhan_df.index >= cutoff]
-                    dhan_df = dhan_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-                    dhan_df = dhan_df[dhan_df["Volume"] > 0]
-                    if not dhan_df.empty:
-                        logger.info(f"[intraday] Dhan: {len(dhan_df)} 15m bars for {clean}")
-                        df = dhan_df
-        except Exception as e:
-            logger.debug(f"[intraday] Dhan 15m fetch failed for {clean}: {e}")
-
+    raw = market_data.get_ohlcv(f"{clean}.NS", period=f"{max(days + 3, 7)}d", interval="15m")
+    df = _to_ist_session(raw)
     if df.empty:
         logger.warning(f"[intraday] No 15m data available for {clean}")
         return df
-
-    _INTRADAY_CACHE[clean] = (df, datetime.now())
+    df.attrs = {"source": raw.attrs.get("source"), "stale": raw.attrs.get("stale", False)}
     return df
 
 
 def _fetch_intraday_extended(symbol: str, days: int = 30) -> pd.DataFrame:
-    """Fetch up to `days` of 15m bars for backtesting (bypasses short cache)."""
+    """
+    Up to ~59 days of real 15-minute bars for backtesting (Yahoo's 15m limit).
+    Synthetic bars are only generated when ASTRA_ALLOW_SYNTHETIC=true, and the
+    result is always tagged df.attrs["source"] == "synthetic".
+    """
+    from app.core.config import env_flag
+    from app.services.market_data import market_data
     clean = symbol.strip().replace(".NS", "").replace(".BSE", "").upper()
-    df = pd.DataFrame()
+    raw = market_data.get_ohlcv(f"{clean}.NS", period=f"{min(days + 7, 59)}d", interval="15m")
+    df = _to_ist_session(raw)
+    if not df.empty:
+        df.attrs = {"source": raw.attrs.get("source"), "stale": raw.attrs.get("stale", False)}
+        return df
 
-    # Yahoo Finance via yfinance — up to 60 days of real 15m bars using date range.
-    # yfinance supports 15m up to 60 days when start/end are specified (not period=).
-    # Capped at 59 days to stay within the free-tier limit.
-    try:
-        import yfinance as _yf
-        from datetime import datetime as _dt, timedelta as _td
-        _end   = _dt.now()
-        _start = _end - _td(days=min(days + 5, 59))
-        yf_df  = _yf.download(
-            f"{clean}.NS",
-            start=_start.strftime("%Y-%m-%d"),
-            end=_end.strftime("%Y-%m-%d"),
-            interval="15m",
-            progress=False,
-            auto_adjust=True,
-        )
-        if yf_df is not None and not yf_df.empty:
-            # Flatten MultiIndex columns that yfinance sometimes produces
-            if isinstance(yf_df.columns, pd.MultiIndex):
-                yf_df.columns = yf_df.columns.get_level_values(0)
-            if yf_df.index.tz is None:
-                yf_df.index = yf_df.index.tz_localize("Asia/Kolkata")
-            else:
-                yf_df.index = yf_df.index.tz_convert("Asia/Kolkata")
-            yf_df = yf_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-            yf_df = yf_df[yf_df["Volume"] > 0]
-            if not yf_df.empty:
-                logger.info(f"[backtest] Yahoo 15m (date-range): {len(yf_df)} bars for {clean}")
-                df = yf_df
-    except Exception as e:
-        logger.debug(f"[backtest] Yahoo 15m fetch failed for {clean}: {e}")
+    if not env_flag("ASTRA_ALLOW_SYNTHETIC", False):
+        logger.warning(f"[backtest] {clean}: no real 15m data and synthetic fallback disabled")
+        return pd.DataFrame()
 
-    # Upstox v2 — free with account, up to 1 month of real 15m bars (1min resampled)
-    # Requires daily token refresh via /upstox/login after first setup.
-    if df.empty:
-        try:
-            from app.services.upstox_data import upstox_service
-            if upstox_service.is_available():
-                period_str = "1mo" if days <= 30 else ("3mo" if days <= 90 else "6mo")
-                up_df = upstox_service.get_ohlcv(clean, period=period_str, interval="15m")
-                if up_df is not None and not up_df.empty:
-                    up_df = up_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-                    up_df = up_df[up_df["Volume"] > 0]
-                    if not up_df.empty:
-                        logger.info(f"[backtest] Upstox 15m: {len(up_df)} bars for {clean}")
-                        df = up_df
-        except Exception as e:
-            logger.debug(f"[backtest] Upstox fetch failed for {clean}: {e}")
-
-    # Twelve Data — free tier supports 1h intraday for some Indian stocks
-    # Format: RELIANCE:NSE  (colon separator, no .NS suffix)
-    if df.empty:
-        try:
-            import os, requests as _req, pandas as _pd
-            td_key = os.getenv("TWELVE_DATA_KEY", "")
-            if td_key:
-                td_sym = f"{clean}:NSE"
-                outputsize = min(days * 8, 5000)   # ~8 × 1h bars per trading day
-                url = (
-                    f"https://api.twelvedata.com/time_series?symbol={td_sym}"
-                    f"&interval=1h&outputsize={outputsize}&apikey={td_key}&format=JSON"
-                )
-                r = _req.get(url, timeout=10)
-                data = r.json()
-                if "values" in data and len(data["values"]) > 10:
-                    td_df = _pd.DataFrame(data["values"])
-                    td_df["datetime"] = _pd.to_datetime(td_df["datetime"])
-                    td_df = td_df.set_index("datetime").sort_index()
-                    td_df = td_df.rename(columns={
-                        "open": "Open", "high": "High",
-                        "low": "Low", "close": "Close", "volume": "Volume"
-                    })
-                    td_df = td_df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
-                    td_df.index = td_df.index.tz_localize("Asia/Kolkata")
-                    td_df = td_df.dropna(subset=["Close"])
-                    if not td_df.empty:
-                        logger.info(f"[backtest] Twelve Data: {len(td_df)} 1h bars for {clean}")
-                        df = td_df
-        except Exception as e:
-            logger.debug(f"[backtest] Twelve Data fetch failed for {clean}: {e}")
-
-    # Dhan HQ (requires daily session activation)
-    if df.empty:
-        try:
-            from app.services.dhan_data import dhan_data_service
-            if dhan_data_service.is_available():
-                period = "3mo" if days > 60 else "1mo"
-                dhan_df = dhan_data_service.get_ohlcv(clean, period=period, interval="15m")
-                if not dhan_df.empty:
-                    if dhan_df.index.tz is None:
-                        dhan_df.index = dhan_df.index.tz_localize("Asia/Kolkata")
-                    else:
-                        dhan_df.index = dhan_df.index.tz_convert("Asia/Kolkata")
-                    cutoff = dhan_df.index[-1] - pd.Timedelta(days=days + 14)
-                    dhan_df = dhan_df[dhan_df.index >= cutoff]
-                    dhan_df = dhan_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-                    dhan_df = dhan_df[dhan_df["Volume"] > 0]
-                    if not dhan_df.empty:
-                        df = dhan_df
-        except Exception as e:
-            logger.debug(f"[backtest] Dhan extended fetch failed for {clean}: {e}")
-
-    # ── Synthetic fallback (dev/testing only) ────────────────────────────────
-    # When all live intraday sources are unavailable (Yahoo 429, Dhan inactive),
-    # generate fully self-contained synthetic 15m bars.  Tries to seed the path
-    # from real daily OHLCV (AV/Yahoo); if all sources fail, uses a GBM with
-    # typical Nifty 50 parameters.  Clearly flagged in log — not for live use.
-    if df.empty:
-        try:
-            daily_df = _get_daily_for_synthesis(clean)
-            synth = _synthesize_intraday(daily_df, n_bars=26, symbol=clean)
-            if not synth.empty:
-                df = synth
-                logger.warning(
-                    f"[backtest] {clean}: SYNTHETIC 15m data "
-                    f"({len(df)} bars, {len(daily_df)} daily seed bars). "
-                    "Activate Yahoo / Dhan for real backtesting."
-                )
-        except Exception as e:
-            logger.debug(f"[backtest] Synthetic fallback failed for {clean}: {e}")
-
-    return df
+    daily_df = _get_daily_for_synthesis(clean)
+    synth = _synthesize_intraday(daily_df, n_bars=26, symbol=clean)
+    if not synth.empty:
+        synth.attrs = {"source": "synthetic", "stale": True}
+        logger.warning(f"[backtest] {clean}: using SYNTHETIC 15m data ({len(synth)} bars)")
+    return synth
 
 
 def _get_daily_for_synthesis(symbol: str) -> pd.DataFrame:
-    """Try to get real daily OHLCV to seed the synthetic generator. Returns empty DF on failure."""
-    # Only use in-process cache — never trigger a live API call that could fail or rate-limit
-    try:
-        from app.services.ai_predictor import cache_get
-        cached = cache_get(symbol, "1d")
-        if cached is not None and not cached.empty:
-            return cached
-    except Exception:
-        pass
-    # Try AV directly — this is a single targeted call, not the full fallback chain
-    try:
-        import os, requests as _r
-        av_key = os.getenv("ALPHA_VANTAGE_API_KEY", os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ"))
-        for fmt in [symbol + ".BSE", symbol]:
-            url = (
-                f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-                f"&symbol={fmt}&apikey={av_key}&outputsize=compact"
-            )
-            res = _r.get(url, timeout=6)
-            data = res.json()
-            if "Time Series (Daily)" in data:
-                ts = data["Time Series (Daily)"]
-                df_av = pd.DataFrame.from_dict(ts, orient="index")
-                df_av = df_av.rename(columns={
-                    "1. open": "Open", "2. high": "High",
-                    "3. low": "Low",  "4. close": "Close", "5. volume": "Volume"
-                })
-                df_av.index = pd.to_datetime(df_av.index)
-                df_av = df_av.astype(float).sort_index()
-                if not df_av.empty:
-                    return df_av
-    except Exception:
-        pass
-    return pd.DataFrame()
+    """Real daily bars to seed the synthetic generator (empty if unavailable)."""
+    from app.services.market_data import market_data
+    return market_data.get_ohlcv(f"{symbol}.NS", period="3mo", interval="1d")
 
 
 # Typical Nifty 50 base prices (used when no real data is available)
@@ -750,19 +579,27 @@ class IntradayEngine:
             "strategies_detail":    {},
         }
 
-        # After NO_TRADE_AFTER: return HOLD with advisory
-        if datetime.now(_IST).time() > dtime(*[int(x) for x in NO_TRADE_AFTER.split(":")]):
-            base_result["signal"]   = "HOLD"
-            base_result["strategy"] = "NO_NEW_TRADES"
-            return base_result
+        # Outside the entry window (after 14:45 IST, pre-open, weekends) we still
+        # load data and evaluate strategies so the UI can show context, but the
+        # final signal is forced to HOLD (see end of method).
+        now_t = now_ist.time()
+        entry_window_open = (
+            now_ist.weekday() < 5
+            and dtime(9, 15) <= now_t <= dtime(*[int(x) for x in NO_TRADE_AFTER.split(":")])
+        )
 
         try:
             df = _fetch_intraday(symbol, days=5)
             if df.empty:
                 logger.warning(f"[intraday] No data for {symbol}")
+                base_result["error"] = "No 15-minute data from any provider — see /api/data/health"
                 return base_result
 
-            base_result["data_source"] = "Dhan" if "dhan" in str(type(df)) else "market_data"
+            base_result["data_source"] = df.attrs.get("source") or "unknown"
+            base_result["data_stale"]  = bool(df.attrs.get("stale"))
+            base_result["last_bar"]    = str(df.index[-1])
+            # Strategies evaluate "today's" session: use the latest session in the data
+            today = df.index[-1].date()
             base_result["trend_bias"]  = self._compute_trend_bias(df)
 
             # Run all three strategies
@@ -811,12 +648,16 @@ class IntradayEngine:
                 "entry_price":ref["entry_price"],
                 "sl":         ref["sl"],
                 "tp":         ref["tp"],
-                "data_source": "Dhan_15m",
             })
 
         except Exception as exc:
             logger.error(f"[intraday] analyze_intraday({symbol}) error: {exc}", exc_info=True)
 
+        if not entry_window_open and base_result["signal"] != "HOLD":
+            base_result["indicative_signal"] = base_result["signal"]
+            base_result["signal"]   = "HOLD"
+            base_result["strategy"] = "NO_NEW_TRADES"
+            base_result["note"] = "Outside the 09:15–14:45 IST entry window — signal shown for reference only."
         return base_result
 
 

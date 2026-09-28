@@ -22,7 +22,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
+
 from datetime import datetime, timedelta
 from functools import lru_cache
 import warnings
@@ -78,8 +78,7 @@ CRYPTO_FEATURE_COLS = [
 class CryptoEngine:
     def __init__(self):
         logger.info("Initialized ASTRA.CRYPTO Engine v1.0")
-        self.exchange = None
-        self._init_ccxt()
+        self.exchange = None   # v1.13: Binance is reached via market_data (data-api.binance.vision + fallbacks)
         self.fear_greed_cache = None
         self.fear_greed_updated = None
         self.btc_dominance_cache = None
@@ -109,10 +108,19 @@ class CryptoEngine:
             lstm_path = os.path.join(MODELS_DIR, "astra_lstm_crypto.keras")
             scaler_path = os.path.join(MODELS_DIR, "astra_lstm_crypto_scaler.joblib")
             if os.path.exists(lstm_path) and os.path.exists(scaler_path):
-                import tensorflow as tf
-                self.lstm_model = tf.keras.models.load_model(lstm_path)
-                self.lstm_scaler = joblib.load(scaler_path)
-                logger.info("Loaded ASTRA.CRYPTO LSTM model.")
+                from app.services.model_compat import load_keras_model
+                model = load_keras_model(lstm_path)
+                # The engine expects a 3-class classifier [P_DOWN, P_NEUTRAL, P_UP].
+                # The model file shipped in the repo is an older 1-output regressor;
+                # feeding it to the classifier logic turned most predictions into SELL.
+                if int(model.output_shape[-1]) != 3:
+                    logger.warning(
+                        f"Crypto LSTM has {model.output_shape[-1]} output(s), expected 3 — ignoring it "
+                        "(rule-based crypto engine used). Retrain: python train_models.py")
+                else:
+                    self.lstm_model = model
+                    self.lstm_scaler = joblib.load(scaler_path)
+                    logger.info("Loaded ASTRA.CRYPTO LSTM model.")
         except ImportError:
             logger.warning("TensorFlow not available. CRYPTO LSTM disabled.")
         except Exception as e:
@@ -145,7 +153,10 @@ class CryptoEngine:
             return self.fear_greed_cache
         except Exception as e:
             logger.debug(f"Fear & Greed fetch failed: {e}")
-            return {"value": 50, "label": "Neutral", "updated": ""}
+            # Remember the failure for 10 min so every analysis doesn't wait on a dead host
+            self.fear_greed_cache = {"value": 50, "label": "Neutral (unavailable)", "updated": ""}
+            self.fear_greed_updated = now - timedelta(seconds=3000)
+            return self.fear_greed_cache
 
     def get_btc_dominance(self) -> float:
         """
@@ -168,95 +179,27 @@ class CryptoEngine:
             return self.btc_dominance_cache
         except Exception as e:
             logger.debug(f"BTC dominance fetch failed: {e}")
+            self.btc_dominance_cache = 50.0
+            self.btc_dom_updated = now - timedelta(seconds=3000)
             return 50.0
 
     # ─────────────────────── DATA FETCHING ───────────────────────
 
-    def _fetch_ccxt(self, ccxt_pair: str, timeframe: str = "1d", limit: int = 500) -> pd.DataFrame:
-        """Fetch OHLCV from Binance via CCXT."""
-        if self.exchange is None:
-            return pd.DataFrame()
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(ccxt_pair, timeframe=timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=["timestamp", "Open", "High", "Low", "Close", "Volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df = df.set_index("timestamp")
-            df = df.astype(float)
-            logger.info(f"CCXT Binance: {len(df)} bars for {ccxt_pair}")
-            return df
-        except Exception as e:
-            logger.error(f"CCXT fetch failed for {ccxt_pair}: {e}")
-            return pd.DataFrame()
-
-    def _fetch_yfinance_crypto(self, symbol: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-        """Fallback: yfinance for crypto using the circuit-breaker-protected downloader."""
-        try:
-            # 1. Try Twelve Data first for crypto (BTC-USD → BTC/USD)
-            td_key = os.getenv("TWELVE_DATA_KEY", "")
-            if td_key and interval == "1d" and "-USD" in symbol:
-                td_sym = symbol.replace("-", "/")
-                size_map = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730}
-                outputsize = size_map.get(period, 365)
-                try:
-                    url = (f"https://api.twelvedata.com/time_series?symbol={td_sym}"
-                           f"&interval=1day&outputsize={outputsize}&apikey={td_key}&format=JSON")
-                    res = requests.get(url, timeout=8)
-                    data = res.json()
-                    if "values" in data and len(data["values"]) > 20:
-                        df_td = pd.DataFrame(data["values"])
-                        df_td["datetime"] = pd.to_datetime(df_td["datetime"])
-                        df_td = df_td.set_index("datetime").sort_index()
-                        df_td = df_td.rename(columns={"open": "Open", "high": "High",
-                                                       "low": "Low", "close": "Close",
-                                                       "volume": "Volume"})
-                        df_td = df_td[["Open", "High", "Low", "Close", "Volume"]].astype(float)
-                        logger.info(f"Twelve Data crypto OK for {symbol}: {len(df_td)} bars")
-                        return df_td
-                except Exception as e:
-                    logger.debug(f"Twelve Data crypto failed for {symbol}: {e}")
-
-            # 2. yfinance with circuit-breaker protection
-            from app.services.ai_predictor import _yf_download_safe
-            df = _yf_download_safe(symbol, period=period, interval=interval, timeout_sec=6)
-            if df is not None and not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-                return df
-        except Exception as e:
-            logger.error(f"Crypto data fetch failed for {symbol}: {e}")
-        return pd.DataFrame()
-
     def fetch_data(self, symbol: str, market: str = "international",
                    timeframe: str = "1d", limit: int = 500) -> pd.DataFrame:
         """
-        Main data fetcher with market toggle.
-        market: "international" → CCXT Binance
-                "indian" → yfinance .INR pairs
+        OHLCV for a crypto pair via the unified market-data layer.
+        international (BTC-USD …): Binance public data → Yahoo → yfinance → Twelve Data
+        indian (BTC-INR …):        Yahoo → yfinance
         """
-        if market == "indian":
-            # Indian market: use yfinance .INR pairs
-            yf_symbol = INDIAN_CRYPTO.get(symbol, {}).get("yf_symbol", symbol)
-            # Period based on timeframe
-            period = "2y" if timeframe == "1d" else ("3mo" if timeframe == "1h" else "1mo")
-            df = self._fetch_yfinance_crypto(yf_symbol, period=period, interval=timeframe)
-            if df.empty:
-                logger.warning(f"⚠️  Data source exhausted for Indian crypto {symbol}")
-            return df
-        else:
-            # International: CCXT first, yfinance fallback
-            ccxt_pair = INTERNATIONAL_CRYPTO.get(symbol, {}).get("ccxt_pair")
-            if ccxt_pair and self.exchange is not None:
-                # Map timeframe to CCXT format
-                tf_map = {"1d": "1d", "4h": "4h", "1h": "1h", "15m": "15m"}
-                ccxt_tf = tf_map.get(timeframe, "1d")
-                df = self._fetch_ccxt(ccxt_pair, timeframe=ccxt_tf, limit=limit)
-                if not df.empty:
-                    return df
-            # Fallback: yfinance USD pairs
-            df = self._fetch_yfinance_crypto(symbol, period="2y", interval=timeframe)
-            if df.empty:
-                logger.warning(f"⚠️  Data source exhausted for {symbol}")
-            return df
+        from app.services.market_data import market_data
+        sym = INDIAN_CRYPTO.get(symbol, {}).get("yf_symbol", symbol) if market == "indian" else symbol
+        per_day = {"1d": 1, "4h": 6, "1h": 24, "15m": 96}.get(timeframe, 1)
+        days = max(30, int(limit / per_day) + 5)
+        df = market_data.get_ohlcv(sym, period=f"{days}d", interval=timeframe)
+        if df.empty:
+            logger.warning(f"⚠️  No crypto data for {sym} ({timeframe}) — see /api/data/health")
+        return df
 
     # ─────────────────────── INDICATOR LIBRARY ───────────────────────
 
@@ -548,12 +491,10 @@ class CryptoEngine:
             # ── Build Chart Data ──
             chart_data = []
             used_times = set()
+            intraday = timeframe not in ("1d", "1wk")
             for idx, row in df.tail(180).iterrows():
-                try:
-                    t_str = idx.strftime("%Y-%m-%d %H:%M") if hasattr(idx, "strftime") else str(idx)[:16]
-                    t_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-                except Exception:
-                    t_date = str(idx)[:10]
+                # Daily → "YYYY-MM-DD"; intraday → epoch seconds (keeps every bar)
+                t_date = int(pd.Timestamp(idx).timestamp()) if intraday else pd.Timestamp(idx).strftime("%Y-%m-%d")
                 if t_date in used_times:
                     continue
                 used_times.add(t_date)
@@ -601,12 +542,12 @@ class CryptoEngine:
                 "engine": engine,
                 "chartData": chart_data,
                 "data_freshness_note": (
-                    "⚠️  Data Rate-Limit Notice: To preserve API quotas, prices are cached up to 60 s "
-                    "and OHLCV bars up to 4 h. Entry / SL / TP levels shown are indicative — "
-                    "always confirm the live market price before executing any trade."
+                    "Stale data: live providers unreachable, showing last cached bars."
+                    if df_raw.attrs.get("stale") else
+                    "Indicative levels from latest bars — confirm the live price before acting."
                 ),
-                "price_cache_ttl_sec": 60,
-                "ohlcv_cache_ttl_hr": 4,
+                "data_source": df_raw.attrs.get("source"),
+                "data_stale": bool(df_raw.attrs.get("stale")),
             }
 
         except Exception as e:
@@ -614,39 +555,32 @@ class CryptoEngine:
             return self._error_response(symbol, str(e))
 
     def get_watchlist_prices(self, market: str = "international") -> list:
-        """
-        Fast bulk price fetch for the watchlist ticker strip.
-        Returns list of {symbol, name, price, change_24h, signal}.
-        """
+        """Price + 24h change for the watchlist strip (parallel, cached, never hangs)."""
+        from concurrent.futures import ThreadPoolExecutor
+        from app.services.market_data import market_data
         assets = INTERNATIONAL_CRYPTO if market == "international" else INDIAN_CRYPTO
-        results = []
-        for symbol, info in assets.items():
-            try:
-                if market == "international" and self.exchange:
-                    ticker = self.exchange.fetch_ticker(info["ccxt_pair"])
-                    price = ticker["last"]
-                    change = ticker.get("percentage", 0.0) or 0.0
-                else:
-                    yf_sym = info.get("yf_symbol", symbol)
-                    # Use circuit-breaker-protected price fetch
-                    from app.services.ai_predictor import ai_engine as _ai
-                    price = _ai.get_realtime_price(yf_sym) or 0.0
-                    change = 0.0  # Change % not available without yfinance.fast_info
 
-                results.append({
-                    "symbol": symbol,
-                    "name": info["name"],
-                    "price": round(float(price), 4),
-                    "change_24h": round(float(change), 2),
-                    "risk_class": info["risk_class"],
-                    "currency": "INR" if market == "indian" else "USD",
-                })
+        def one(item):
+            symbol, info = item
+            sym = info.get("yf_symbol", symbol)
+            row = {"symbol": symbol, "name": info["name"], "price": 0.0, "change_24h": 0.0,
+                   "risk_class": info.get("risk_class", "major"),
+                   "currency": "INR" if market == "indian" else "USD", "source": None}
+            try:
+                q = market_data.get_quote_info(sym)
+                df = market_data.get_ohlcv(sym, period="7d", interval="1d")
+                price = q["price"] or (float(df["Close"].iloc[-1]) if not df.empty else 0.0)
+                if len(df) >= 2 and price:
+                    prev = float(df["Close"].iloc[-2])
+                    row["change_24h"] = round((price / prev - 1) * 100, 2) if prev else 0.0
+                row["price"] = round(float(price), 4)
+                row["source"] = q["source"] or df.attrs.get("source")
             except Exception as e:
                 logger.debug(f"Watchlist price failed for {symbol}: {e}")
-                results.append({"symbol": symbol, "name": info["name"], "price": 0.0,
-                                 "change_24h": 0.0, "risk_class": info.get("risk_class", "major"),
-                                 "currency": "INR" if market == "indian" else "USD"})
-        return results
+            return row
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            return list(pool.map(one, assets.items()))
 
     def _error_response(self, symbol: str, error: str) -> dict:
         return {

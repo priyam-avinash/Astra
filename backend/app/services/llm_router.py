@@ -91,15 +91,38 @@ class LLMRouter:
         """
         Text completion. Tries Anthropic first, then Groq, then raises LLMUnavailableError.
         """
+        errors = []
         ak = self._anthropic_key()
         if ak:
-            return self._anthropic_complete(ak, system, user, max_tokens)
+            try:
+                return self._anthropic_complete(ak, system, user, max_tokens)
+            except Exception as e:   # bad key, overloaded, network … → try the next provider
+                errors.append(f"anthropic: {self._describe(e)}")
+                logger.warning(f"Anthropic call failed, falling back: {errors[-1]}")
 
         gk = self._groq_key()
         if gk:
-            return self._groq_complete(gk, system, user, max_tokens)
+            try:
+                return self._groq_complete(gk, system, user, max_tokens)
+            except Exception as e:
+                errors.append(f"groq: {self._describe(e)}")
+                logger.warning(f"Groq call failed: {errors[-1]}")
 
+        if errors:
+            raise LLMUnavailableError("All LLM providers failed — " + "; ".join(errors))
         raise LLMUnavailableError("No LLM provider configured. Add Anthropic or Groq key in Settings.")
+
+    @staticmethod
+    def _describe(e: Exception) -> str:
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                body = resp.json()
+                msg = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else body.get("error")
+            except Exception:
+                msg = (resp.text or "")[:120]
+            return f"HTTP {resp.status_code} {msg or ''}".strip()
+        return f"{type(e).__name__}: {str(e)[:120]}"
 
     def complete_json(self, system: str, user: str, schema_hint: str = "",
                       max_tokens: int = 600) -> dict:

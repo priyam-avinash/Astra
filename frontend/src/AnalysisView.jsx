@@ -616,22 +616,22 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
               </div>
             </div>
 
-            {/* ── DATA FRESHNESS NOTICE — always visible on every audit report ── */}
-            {data.data_freshness_note && (
+            {/* ── DATA SOURCE / FRESHNESS ── */}
+            {(data.data_source || data.data_freshness_note) && (
               <div style={{
                 display: 'flex', alignItems: 'flex-start', gap: 10,
-                background: 'rgba(251,191,36,.07)', border: '1px solid rgba(251,191,36,.35)',
+                background: data.data_stale ? 'rgba(239,83,80,.08)' : 'rgba(41,98,255,.06)',
+                border: `1px solid ${data.data_stale ? 'rgba(239,83,80,.4)' : 'rgba(41,98,255,.25)'}`,
                 borderRadius: 8, padding: '10px 14px',
               }}>
-                <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>⚠️</span>
+                <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>{data.data_stale ? '⚠️' : 'ℹ️'}</span>
                 <div>
-                  <span style={{ color: '#fbbf24', fontWeight: 700, fontSize: 12, letterSpacing: '.04em', textTransform: 'uppercase' }}>
-                    Data Rate-Limit Notice
+                  <span style={{ color: data.data_stale ? '#ef9a9a' : '#90caf9', fontWeight: 700, fontSize: 12, letterSpacing: '.04em', textTransform: 'uppercase' }}>
+                    {data.data_stale ? 'Stale data' : 'Data source'}: {data.data_source || 'unknown'}
+                    {data.last_bar ? ` · last bar ${String(data.last_bar).slice(0, 16)}` : ''}
                   </span>
-                  <p style={{ margin: '3px 0 0', color: '#fde68a', fontSize: 12, lineHeight: 1.5 }}>
-                    To preserve free-tier API quotas, <strong>prices are cached up to 60 s</strong> and{' '}
-                    <strong>OHLCV bars (RSI / MACD / ADX) up to 4 h</strong>. Entry / SL / TP levels
-                    shown are indicative — <strong>always confirm the live market price before executing any trade.</strong>
+                  <p style={{ margin: '3px 0 0', color: '#cbd5e1', fontSize: 12, lineHeight: 1.5 }}>
+                    {data.data_freshness_note} Paper trading only.
                   </p>
                 </div>
               </div>

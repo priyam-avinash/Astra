@@ -3,7 +3,7 @@ import { API_URL } from './config';
 
 import {
   Settings, Eye, EyeOff, Save, RefreshCw, CheckCircle, XCircle,
-  AlertTriangle, Brain, Zap, ChevronDown, ChevronUp, Info
+  AlertTriangle, Brain, Zap, ChevronDown, ChevronUp, Info, Database, Activity
 } from 'lucide-react';
 import BrokersPanel from './BrokersPanel';
 
@@ -145,6 +145,83 @@ function AgentTierCard({ tier, color, title, desc, alwaysOn, alwaysDebate, onTog
   );
 }
 
+
+// ── Market data provider health ────────────────────────────────────────────
+const PROVIDER_LABELS = {
+  yahoo: 'Yahoo Finance', yfinance: 'yfinance (Yahoo)', nse: 'NSE India', binance: 'Binance (crypto)',
+  dhan: 'Dhan HQ', upstox: 'Upstox', twelve_data: 'Twelve Data', alpha_vantage: 'Alpha Vantage', yahoo_fundamentals: 'Fundamentals (Yahoo)',
+};
+const STATUS_COLOR = { ok: 'green', idle: 'yellow', cooldown: 'red', error: 'red', not_configured: 'grey' };
+
+function DataHealthCard({ open, onToggle }) {
+  const [health, setHealth] = useState(null);
+  const [probing, setProbing] = useState(false);
+  const [err, setErr] = useState('');
+
+  const fetchHealth = useCallback(async (probe = false) => {
+    setErr('');
+    if (probe) setProbing(true);
+    try {
+      const tok = localStorage.getItem('astra_token');
+      const r = await fetch(`${API}/api/data/health${probe ? '?probe=true' : ''}`,
+        { headers: tok ? { Authorization: `Bearer ${tok}` } : {} });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setHealth(await r.json());
+    } catch (e) { setErr(`Backend unreachable (${e.message}). Is it running on :8000?`); }
+    setProbing(false);
+  }, []);
+
+  useEffect(() => { fetchHealth(false); const t = setInterval(() => fetchHealth(false), 30000); return () => clearInterval(t); }, [fetchHealth]);
+
+  const probe = health?.probe || {};
+  const probeFor = (name) => Object.entries(probe).filter(([k]) => k.startsWith(name + ':'));
+
+  return (
+    <SectionCard title="Market Data Providers" icon={<Activity size={14} />} open={open} onToggle={onToggle}>
+      <InfoBox>
+        Free providers (Yahoo, NSE, Binance) need <strong>no key</strong>. Keys below are optional extras.
+        Every trade in ASTRA is <strong>paper-only</strong>. No real orders are ever sent, even with Dhan configured.
+      </InfoBox>
+      {err && <div style={{ ...badge('red'), marginBottom: 12 }}><XCircle size={12} /> {err}</div>}
+      {health && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+          {Object.entries(health.providers).map(([name, p]) => {
+            const c = STATUS_COLOR[p.status] || 'yellow';
+            const probes = probeFor(name);
+            return (
+              <div key={name} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '8px 0', borderBottom: '1px solid #232636' }}>
+                <div style={{ width: 170, fontSize: 13, color: '#d1d5db', fontWeight: 600 }}>{PROVIDER_LABELS[name] || name}</div>
+                <span style={c === 'grey' ? { ...badge('yellow'), background: 'rgba(107,114,128,.15)', color: '#9ca3af' } : badge(c)}>
+                  {p.status.replace('_', ' ')}
+                </span>
+                <div style={{ flex: 1, fontSize: 12, color: '#6b7280', lineHeight: 1.5 }}>
+                  {p.ok > 0 && <span style={{ color: '#26a69a' }}>{p.ok} ok </span>}
+                  {p.failed > 0 && <span>{p.failed} failed </span>}
+                  {p.last_error && p.status !== 'ok' && <div style={{ color: '#ef9a9a', wordBreak: 'break-word' }}>{p.last_error}</div>}
+                  {p.cooldown_until && <div>retrying after {p.cooldown_until.slice(11)}</div>}
+                  {probes.map(([k, v]) => (
+                    <div key={k} style={{ color: v.ok ? '#26a69a' : '#ef9a9a' }}>
+                      {k.split(':')[1]}: {v.ok ? `✓ ${v.bars} bars · last ${v.last_close} (${v.last_date}) · ${v.secs}s` : `✗ ${v.detail}`}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 12, color: '#6b7280' }}>
+            Chrome TLS impersonation (curl_cffi): {health.curl_cffi ? <span style={{ color: '#26a69a' }}>on</span> : <span style={{ color: '#ef5350' }}>missing (pip install curl_cffi)</span>}
+            {' · '}Dhan live feed: {health.dhan_feed?.live ? 'streaming' : (health.dhan_feed?.running ? 'connecting' : 'off')}
+          </div>
+        </div>
+      )}
+      <button onClick={() => fetchHealth(true)} disabled={probing}
+        style={{ ...S.btn, background: probing ? '#1e2235' : '#2962ff', color: '#fff', alignSelf: 'flex-start' }}>
+        <RefreshCw size={14} /> {probing ? 'Testing providers…' : 'Test all providers now'}
+      </button>
+    </SectionCard>
+  );
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 export default function SettingsView() {
   const [form, setForm]       = useState({});
@@ -152,7 +229,8 @@ export default function SettingsView() {
   const [saving, setSaving]   = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [loading, setLoading] = useState(true);
-  const [exp, setExp]         = useState({ keys: true, agents: true, exec: true });
+  const [exp, setExp]         = useState({ data: true, dataKeys: false, keys: true, agents: true, exec: true });
+  const [keySources, setKeySources] = useState({});
 
   const token   = localStorage.getItem('astra_token');
   const headers = { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json' };
@@ -164,7 +242,12 @@ export default function SettingsView() {
       if (res.ok) {
         const d = await res.json();
         setProviderStatus(d.provider_status || null);
+        setKeySources(d.key_sources || {});
         setForm({
+          twelve_data_key:        d.twelve_data_key    || '',
+          alpha_vantage_key:      d.alpha_vantage_key  || '',
+          dhan_client_id:         d.dhan_client_id     || '',
+          dhan_access_token:      d.dhan_access_token  || '',
           llm_enabled:            d.llm_enabled === 'true' || d.llm_enabled === true,
           anthropic_api_key:      d.anthropic_api_key  || '',
           groq_api_key:           d.groq_api_key       || '',
@@ -217,6 +300,31 @@ export default function SettingsView() {
           </div>
           <div style={S.sub}>Configure ASTRA's AI agents, auto-execution, and API keys</div>
         </div>
+
+        {/* ── Market data ───────────────────────────────── */}
+        <DataHealthCard open={exp.data} onToggle={() => tog('data')} />
+
+        <SectionCard title="Market Data API Keys (optional)" icon={<Database size={14} />} open={exp.dataKeys} onToggle={() => tog('dataKeys')}>
+          <InfoBox>
+            Keys saved here override <code>backend/.env</code> and take effect immediately (no restart).
+            {' '}Twelve Data's free plan covers US stocks and crypto. Indian (NSE) symbols need a paid plan.
+            {' '}Dhan needs a <strong>Data API</strong> subscription, and access tokens expire. Dhan is used for <strong>market data only</strong>.
+          </InfoBox>
+          {[
+            ['twelve_data_key', 'Twelve Data API key', 'twelvedata.com: 800 requests/day free', false],
+            ['alpha_vantage_key', 'Alpha Vantage API key', 'alphavantage.co: 25 requests/day free, daily bars only', false],
+            ['dhan_client_id', 'Dhan client ID', 'From web.dhan.co → My Profile → DhanHQ Trading APIs', true],
+            ['dhan_access_token', 'Dhan access token', 'Regenerate when it expires', false],
+          ].map(([k, label, hint, plain]) => (
+            <FieldRow key={k} label={label} hint={`${hint}${keySources[k] === 'env' ? ' · currently loaded from .env' : ''}`}>
+              <div style={{ width: 340 }}>
+                {plain
+                  ? <input style={S.input} value={form[k] || ''} onChange={e => set(k, e.target.value)} placeholder="optional" />
+                  : <PasswordField value={form[k] || ''} onChange={v => set(k, v)} placeholder={keySources[k] === 'env' ? '(set in .env)' : 'optional'} />}
+              </div>
+            </FieldRow>
+          ))}
+        </SectionCard>
 
         {/* ── LLM API Keys ─────────────────────────────── */}
         <SectionCard title="LLM API Keys" icon={<Brain size={14} />} open={exp.keys} onToggle={() => tog('keys')}>

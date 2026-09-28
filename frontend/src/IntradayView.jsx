@@ -385,8 +385,10 @@ export default function IntradayView() {
                 </span>
               )}
               <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>
-                Signal at {signal.time_of_signal} IST · {signal.data_source || 'market_data'} · Paper mode
+                Signal at {signal.time_of_signal} IST · {signal.data_source || 'market_data'}{signal.data_stale ? ' (stale)' : ''} · Paper mode
               </span>
+              {signal.note && <span style={{ fontSize: 10, color: '#fbbf24' }}>{signal.note}{signal.indicative_signal ? ` Indicative: ${signal.indicative_signal}` : ''}</span>}
+              {signal.error && <span style={{ fontSize: 10, color: '#ef4444' }}>{signal.error}</span>}
             </div>
           </div>
         ) : null}
@@ -432,6 +434,11 @@ export default function IntradayView() {
               <div style={{ color: '#ef4444', fontSize: 13 }}>{backtest.error}</div>
             ) : (
               <>
+                <div style={{ fontSize: 11, marginBottom: 10, color: backtest.synthetic_data ? '#f59e0b' : 'var(--text-tertiary)' }}>
+                  {backtest.synthetic_data
+                    ? '⚠️ SYNTHETIC data. No real 15m bars were available, so these results are not meaningful.'
+                    : `Data: ${backtest.data_source || 'unknown'} (real 15-minute bars)`}
+                </div>
                 {/* Summary header */}
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
                   <StatCard label="Days Tested" value={backtest.trading_days_tested} sub={`${backtest.period_days}d requested`} />

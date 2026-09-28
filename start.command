@@ -65,6 +65,17 @@ if [ ! -f "$VENV" ]; then
 fi
 ok "Python venv found"
 
+# v1.13 needs curl_cffi / newer yfinance / dhanhq — install if the venv predates them
+if ! "$VENV" -c "import curl_cffi, yfinance, dhanhq, fastapi" 2>/dev/null; then
+  step "Updating backend packages (first run after upgrade)…"
+  "$VENV" -m pip install -q -r "$BACKEND_DIR/requirements.txt" || warn "pip install had errors — see above"
+fi
+ok "Backend packages ready"
+
+# Quick data-provider check (non-blocking, 30s max)
+step "Checking market-data providers…"
+( cd "$BACKEND_DIR" && perl -e 'alarm shift; exec @ARGV' 45 "$VENV" check_data.py 2>/dev/null | sed -n '/Provider probe/,/End-to-end/p' | head -20 ) || warn "data check skipped"
+
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
   step "node_modules missing — installing frontend packages (first run)…"
   cd "$FRONTEND_DIR" && npm install --silent

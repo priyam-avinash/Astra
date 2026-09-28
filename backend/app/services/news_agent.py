@@ -74,10 +74,12 @@ class NewsAnalystAgent:
     AV_BASE = "https://www.alphavantage.co/query"
 
     def __init__(self):
-        self.av_key = (
-            os.getenv("ALPHA_VANTAGE_API_KEY")
-            or os.getenv("ALPHA_VANTAGE_KEY", "XV1FMHS5UHPIIPAZ")
-        )
+        pass
+
+    @property
+    def av_key(self):
+        from app.core.config import get_secret
+        return get_secret("alpha_vantage_key")
 
     # ── Public entry point ────────────────────────────────────────────
     def analyze(
@@ -99,15 +101,14 @@ class NewsAnalystAgent:
 
         headlines = self._fetch_news(symbol)
         if not headlines:
-            result = NewsAnalysis(
+            # Not cached: a transient network failure shouldn't hide news all day
+            return NewsAnalysis(
                 sentiment="NEUTRAL",
                 summary="No recent news found for this symbol.",
                 key_events=[],
                 should_gate=False,
                 source="no_data",
             )
-            _NEWS_CACHE[cache_key] = result
-            return result
 
         # Try LLM analysis first
         result = self._llm_analyze(symbol, headlines, signal, confidence)
@@ -120,41 +121,26 @@ class NewsAnalystAgent:
 
     # ── Alpha Vantage news fetch ──────────────────────────────────────
     def _fetch_news(self, symbol: str) -> list[str]:
-        """Returns list of headline strings (up to 15 most recent)."""
+        """Up to 15 recent headlines. Yahoo Finance search (free) → Alpha Vantage (if key)."""
+        from app.services.market_data import market_data
+        items = market_data.get_news(symbol, limit=15)
+        if items:
+            return [f"{n['title']} ({n['publisher']})" if n.get("publisher") else n["title"] for n in items]
+        if not self.av_key:
+            return []
         try:
             bare = symbol.replace(".NS", "").replace(".BSE", "").replace(".BO", "")
-            params = {
-                "function": "NEWS_SENTIMENT",
-                "tickers":  bare,
-                "apikey":   self.av_key,
-                "limit":    "15",
-                "sort":     "LATEST",
-            }
-            resp = requests.get(self.AV_BASE, params=params, timeout=10)
-            data = resp.json()
-
-            if "feed" not in data:
-                # Try global macro news as fallback
-                params2 = {"function": "NEWS_SENTIMENT", "topics": "economy_macro",
-                           "apikey": self.av_key, "limit": "5"}
-                resp2 = requests.get(self.AV_BASE, params=params2, timeout=8)
-                data2 = resp2.json()
-                feed = data2.get("feed", [])
-            else:
-                feed = data["feed"]
-
+            resp = requests.get(self.AV_BASE, timeout=10, params={
+                "function": "NEWS_SENTIMENT", "tickers": bare, "apikey": self.av_key,
+                "limit": "15", "sort": "LATEST"})
+            feed = resp.json().get("feed", [])
             headlines = []
             for item in feed[:15]:
-                title = item.get("title", "")
-                summary = item.get("summary", "")
-                ticker_sentiment = ""
+                tag = ""
                 for ts in item.get("ticker_sentiment", []):
-                    if ts.get("ticker", "").upper() in [bare.upper(), symbol.upper()]:
-                        score = float(ts.get("ticker_sentiment_score", 0))
-                        label = ts.get("ticker_sentiment_label", "")
-                        ticker_sentiment = f" [Score: {score:+.2f}, {label}]"
-                headlines.append(f"{title}{ticker_sentiment}")
-
+                    if ts.get("ticker", "").upper() in (bare.upper(), symbol.upper()):
+                        tag = f" [Score: {float(ts.get('ticker_sentiment_score', 0)):+.2f}, {ts.get('ticker_sentiment_label', '')}]"
+                headlines.append(f"{item.get('title', '')}{tag}")
             return headlines
         except Exception as e:
             logger.warning(f"News fetch failed for {symbol}: {e}")

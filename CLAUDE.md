@@ -40,7 +40,7 @@ Models are saved to `backend/app/models/saved_models/`. Restart backend after re
 ```bash
 cd backend
 source .venv/bin/activate
-pytest tests/test_api.py -v            # Only 2 tests exist (root + health)
+pytest -q                              # offline suite (providers mocked)
 ```
 
 ### Docker (Full Stack)
@@ -79,15 +79,22 @@ python -c "from app.services.ai_predictor import ai_engine; print(ai_engine.anal
 
 All engines share `_compute_features()` (20 features: SMA distances, RSI, MACD, ADX, Stochastic, BB, Donchian, Volume, OBV, Candlestick geometry). Inference always uses `analyze_market_data(symbol, engine=...)` which returns `{signal, confidence, entry_price, target, stop_loss, chartData}`.
 
-### Data Flow
+### Data Flow (v1.13)
 ```
 GET /api/analyze/{symbol}?engine=astra_ml
-  → ai_predictor._fetch_data()          # 4-source fallback: Twelve Data → AlphaVantage → yfinance → yfinance+.NS
-  → data_cache.cache_get/put()          # Disk cache at backend/data/cache/ (8h TTL for daily data)
-  → _compute_features()                 # 20-feature DataFrame
-  → [engine-specific inference]         # signal + ATR-based SL/TP
-  → returns chartData (last 180 bars) + indicators
+  → ai_predictor._fetch_data()  → market_data.get_ohlcv(symbol, period, interval)
+      normalize_symbol()          # "RELIANCE"→"RELIANCE.NS", "NIFTY"→"^NSEI"
+      memory cache (TTL by interval, keyed on symbol+interval, period-aware)
+      provider chain by asset class (see _CHAINS): dhan → yahoo(curl_cffi) → yfinance → nse → twelve_data → alpha_vantage
+      ProviderHealth: per-provider cooldown on auth/quota/rate-limit/network errors
+      disk cache backend/data/cache → served (flagged stale) when all providers fail
+  → _compute_features()          # 20-feature DataFrame
+  → [engine-specific inference]  # signal + ATR-based SL/TP
+  → returns chartData + data_source + data_stale
 ```
+**Never call yfinance/requests for market data directly — use `market_data`.**
+Diagnostics: `python check_data.py`, `GET /api/data/health?probe=true`.
+Secrets: `app/core/config.get_secret(name)` (Settings DB → env; placeholders ignored).
 
 ### Signal → Trade Lifecycle
 ```
@@ -104,10 +111,11 @@ Four tables: `users`, `active_signals` (TargetSignal), `active_positions` (Activ
 
 ### Celery (`backend/app/services/tasks.py`)
 - `analyze_asset` — on-demand async analysis task
-- `monitor_active_positions` — periodic every 15s, handles TSL + auto-exit
+- `monitor_active_positions` — every 15s, handles TSL + auto-exit. Runs via Celery beat when Redis is reachable, otherwise as an asyncio loop inside the API (`main.py` lifespan). Skips stale prices.
+- Use `tasks.dispatch(task, **kw)` instead of `.delay()` (falls back to a thread when Redis is down).
 
 ### Broker (`backend/app/services/broker.py`)
-Dhan API integration. Reads `DHAN_CLIENT_ID` and `DHAN_ACCESS_TOKEN` from `.env`. Falls back to **mock mode** (returns `MOCK-TRD-*` order IDs) when credentials are absent. **Known issue:** Dhan requires numeric `security_id`, not ticker symbols — a lookup table is needed for live execution.
+**Paper trading only.** `PaperTradingEngine` is the only broker; the live Dhan order path was removed in v1.13 and `PAPER_TRADING=false` is ignored. Fills use a live (non-stale) quote ± 0.05% slippage; if only stale data exists the order is rejected (HTTP 503). Dhan credentials are used for market data only (`dhan_data.py`, `dhan_feed.py`, dhanhq ≥ 2.1 `DhanContext` API).
 
 ---
 
@@ -132,7 +140,7 @@ ADX ≥ 25 → Momentum/Breakout mode (Donchian channel). ADX < 20 → Mean Reve
 When fewer than 200 bars are available, `_compute_features()` back-fills `SMA_200` using `expanding().mean()` rather than substituting SMA-30. Always fetch `period="2y"` or longer when training or running ML engines.
 
 ### Model Serialization
-Equity LSTM uses `GlobalAveragePooling1D` (safe to serialize). Crypto LSTM was fixed from a `Lambda` layer to `GlobalAveragePooling1D` — **retrain crypto LSTM** if using a model file built before this fix. Model files: `backend/app/models/saved_models/*.keras` and `*_scaler.joblib`.
+New training code uses `GlobalAveragePooling1D` (safe to serialize). The committed `.keras` files predate that and contain a `Lambda(reduce_sum)` layer, which Keras 3 refuses and which can't be unmarshalled across Python versions; `services/model_compat.load_keras_model()` rebuilds them with an equivalent layer and loads the original weights. The committed crypto LSTM is a 1-output regressor, but the engine expects a 3-class classifier, so it is ignored until retrained (`python train_models.py`).
 
 ### LSTM Training Data Leakage — Fixed
 Both equity and crypto LSTM now fit `RobustScaler` only on the training split (first 80% chronologically). The scaler is then applied to val without refitting. Do not revert to fitting on the full dataset.
@@ -146,7 +154,9 @@ Both equity and crypto LSTM now fit `RobustScaler` only on the training split (f
 | `DATABASE_URL` | No | SQLite | Set to `postgresql://...` for production |
 | `REDIS_URL` | No | `redis://localhost:6379/0` | Required for Celery |
 | `JWT_SECRET_KEY` | No | hardcoded in auth.py | Change before production |
-| `TWELVE_DATA_KEY` | No | — | 800 req/day free, best for NSE stocks |
-| `ALPHA_VANTAGE_KEY` | No | `XV1FMHS5UHPIIPAZ` (free fallback) | 25 req/day |
-| `DHAN_CLIENT_ID` | No | — | Omit for mock trading mode |
-| `DHAN_ACCESS_TOKEN` | No | — | Omit for mock trading mode |
+| `TWELVE_DATA_KEY` | No | — | Free plan: US stocks + crypto (NSE needs paid plan) |
+| `ALPHA_VANTAGE_API_KEY` | No | — | 25 req/day, daily only. The old shared public key is blocked. |
+| `DHAN_CLIENT_ID` / `DHAN_ACCESS_TOKEN` | No | — | Market data only (Data API plan). Never used for orders. |
+| `ASTRA_ALLOW_SYNTHETIC` | No | false | Synthetic intraday bars for backtests (dev only, flagged) |
+
+All keys can also be set in Settings (stored in `app_settings`), which override `.env`.

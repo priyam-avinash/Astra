@@ -2,11 +2,44 @@ from celery import Celery
 from celery.schedules import crontab
 import os
 import logging
+import threading
+import time
 from datetime import datetime
+
+import app.core.config  # noqa: F401  (loads .env)
 
 logger = logging.getLogger(__name__)
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379/0"
+
+_BROKER_CHECK = {"ok": None, "at": 0.0}
+
+
+def broker_available() -> bool:
+    """Is Redis (Celery broker) reachable? Cached 60s; 1s connect timeout."""
+    now = time.time()
+    if _BROKER_CHECK["ok"] is not None and now - _BROKER_CHECK["at"] < 60:
+        return _BROKER_CHECK["ok"]
+    ok = False
+    try:
+        import redis
+        ok = bool(redis.Redis.from_url(REDIS_URL, socket_connect_timeout=1, socket_timeout=1).ping())
+    except Exception:
+        ok = False
+    _BROKER_CHECK.update(ok=ok, at=now)
+    return ok
+
+
+def dispatch(task, **kwargs):
+    """Queue on Celery when Redis is up; otherwise run in a background thread.
+    (Calling .delay() with Redis down blocks on kombu's connection retries.)"""
+    if broker_available():
+        try:
+            return task.apply_async(kwargs=kwargs, retry=False)
+        except Exception as e:
+            logger.warning(f"Celery dispatch failed ({e}); running {task.name} in-process")
+    threading.Thread(target=lambda: task(**kwargs), name=f"task-{task.name}", daemon=True).start()
+    return None
 
 # Setup Celery
 celery_app = Celery("astra_tasks", broker=REDIS_URL, backend=REDIS_URL)
@@ -92,9 +125,11 @@ def reflect_on_closed_trade(
             trade.outcome_return_pct = round(pnl_pct, 3)
 
             # Derive signal label: was the original signal direction correct?
-            if pnl_pct > 0.003:          # > 0.3% gain — clearly correct
+            # pnl_pct is in PERCENT (e.g. 2.3 = +2.3%). v1.12 compared against
+            # 0.003 (a fraction), which labelled almost every trade.
+            if pnl_pct > 0.3:            # > +0.3% — clearly correct
                 trade.signal_label = "CORRECT"
-            elif pnl_pct < -0.003:       # > 0.3% loss — clearly wrong
+            elif pnl_pct < -0.3:         # < -0.3% — clearly wrong
                 trade.signal_label = "INCORRECT"
             else:
                 trade.signal_label = "NEUTRAL"  # scratch / noise
@@ -144,9 +179,11 @@ def monitor_active_positions():
 
         results = []
         for p in positions:
-            # 2. Get current price
-            current_price = ai_engine.get_realtime_price(p.asset)
-            if current_price == 0.0:
+            # 2. Get current price — never act on stale/cached prices
+            from app.services.market_data import market_data
+            q = market_data.get_quote_info(p.asset)
+            current_price = q["price"]
+            if current_price <= 0 or q["stale"]:
                 continue
 
             # Trailing Stop Loss (TSL): Auto-Breakeven at 50% Target
@@ -188,6 +225,7 @@ def monitor_active_positions():
                         quantity=p.quantity,
                         price=current_price
                     )
+                    current_price = float(broker_res.get("executed_price") or current_price)
 
                     # Update DB
                     p.status = "CLOSED"
@@ -215,7 +253,8 @@ def monitor_active_positions():
 
                     # ── Trigger async reflection / learning ──────────────
                     try:
-                        reflect_on_closed_trade.delay(
+                        dispatch(
+                            reflect_on_closed_trade,
                             trade_id=new_history.id,
                             symbol=p.asset,
                             original_signal=p.direction,

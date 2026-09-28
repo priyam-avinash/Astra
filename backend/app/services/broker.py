@@ -1,25 +1,27 @@
 """
 ASTRA Paper Trading Engine
 ===========================
-Simulates order execution using REAL market prices fetched via the AI engine.
-No real money is ever touched. All fills use live LTP with realistic 0.05% slippage.
+Simulates order execution at REAL market prices (0.05% slippage, 0.03% brokerage).
 
-PAPER_MODE is permanently True — live order execution is intentionally disabled.
-DhanLiveBroker.execute_trade raises a hard error on every call regardless of config.
+PAPER TRADING ONLY. As of v1.13 there is no live-order code path in ASTRA:
+the Dhan live broker stub was removed, and PAPER_TRADING=false is ignored.
+Dhan credentials, if configured, are used for market DATA only.
 """
 
 import logging
-import random
 import os
+import random
 import time
 from datetime import datetime
-from dotenv import load_dotenv
+
+import app.core.config  # noqa: F401  (loads .env)
 
 logger = logging.getLogger(__name__)
-load_dotenv()
 
-# Hard-coded True — never reads from env. Live trading intentionally blocked.
-PAPER_MODE = True
+PAPER_MODE = True   # hard-wired; there is no live mode
+
+if os.getenv("PAPER_TRADING", "true").strip().lower() == "false":
+    logger.warning("PAPER_TRADING=false is ignored — ASTRA only supports paper trading.")
 
 
 # ── Paper Trading Engine ───────────────────────────────────────────────────
@@ -37,15 +39,17 @@ class PaperTradingEngine:
         logger.info("📝 ASTRA Paper Trading Engine initialised — no real money involved")
 
     def _get_ltp(self, asset: str, fallback: float) -> float:
-        """Fetch real LTP from the AI engine. Fall back to user_price if unavailable."""
-        try:
-            from app.services.ai_predictor import ai_engine
-            ltp = ai_engine.get_realtime_price(asset)
-            if ltp and ltp > 0:
-                return float(ltp)
-        except Exception as e:
-            logger.warning(f"LTP fetch failed for {asset}: {e}")
-        return fallback
+        """Live LTP from the market-data layer; raises if only stale data is available."""
+        from app.services.market_data import market_data
+        info = market_data.get_quote_info(asset)
+        if info["price"] > 0 and not info["stale"]:
+            return float(info["price"])
+        # Never fill at a stale cached price or at the (possibly days-old) signal
+        # price: that creates fake P&L. Reject instead and say why.
+        raise ValueError(
+            f"No live price for {asset} right now (all data providers failing"
+            f"{'; last cached ' + str(info['price']) if info['price'] else ''}). "
+            "Order not filled. Check Settings → Market Data Providers.")
 
     def _fill_price(self, asset: str, action: str, user_price: float) -> float:
         """LTP ± slippage depending on order direction."""
@@ -62,8 +66,8 @@ class PaperTradingEngine:
         Returns 0.0 if price is unavailable.
         """
         try:
-            from app.services.ai_predictor import ai_engine
-            ltp = ai_engine.get_realtime_price(asset)
+            from app.services.market_data import market_data
+            ltp = market_data.get_quote(asset)
             if ltp and ltp > 0:
                 if direction == "BUY":
                     return round(ltp * (1 - self.SLIPPAGE), 2)
@@ -121,58 +125,24 @@ class PaperTradingEngine:
         }
 
 
-# ── Live Dhan Engine (stub — requires security IDs + credentials) ──────────
+# ── Live broker: permanently blocked ───────────────────────────────────────
 class DhanLiveBroker:
-    """
-    Placeholder for live Dhan HQ execution.
-    NOT SAFE FOR PRODUCTION until SECURITY_ID_MAP is populated.
+    """Kept only as a tripwire for safety tests. Contains no order code: every
+    call raises, whatever credentials or env vars are set."""
+    mode = "BLOCKED"
 
-    To activate:
-      1. Set PAPER_TRADING=false in .env
-      2. Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN in .env
-      3. Download https://images.dhan.co/api-data/api-scrip-master.csv
-         and populate SECURITY_ID_MAP with (symbol → numeric_id) pairs.
-    """
-
-    SECURITY_ID_MAP: dict[str, str] = {
-        "RELIANCE.NS":  "1333",
-        "TCS.NS":       "11536",
-        "HDFCBANK.NS":  "1330",
-        "INFY.NS":      "1594",
-        "ICICIBANK.NS": "4963",
-        # TODO: add all 141 NSE symbols from Dhan scrip master CSV
-    }
-
-    def __init__(self):
-        self.client_id    = os.getenv("DHAN_CLIENT_ID", "")
-        self.access_token = os.getenv("DHAN_ACCESS_TOKEN", "")
-        self.live = False
-        self.mode = "LIVE"
-        if self.client_id and not self.client_id.startswith("ENTER"):
-            try:
-                from dhanhq import dhanhq
-                self.dhan = dhanhq(str(self.client_id), str(self.access_token))
-                self.live = True
-                logger.info("🔴 LIVE Dhan broker initialised")
-            except Exception as e:
-                logger.error(f"Dhan init failed: {e}")
-
-    def get_exit_price(self, asset: str, direction: str) -> float:
-        return 0.0  # Would use Dhan quote API in production
-
-    def execute_trade(self, asset: str, action: str, quantity: int, price: float) -> dict:
-        # Hard block — live order execution is permanently disabled in ASTRA.
-        # This guard fires regardless of credentials, env vars, or self.live state.
+    def execute_trade(self, *args, **kwargs):
         raise RuntimeError(
             "LIVE ORDER BLOCKED: ASTRA is in permanent paper-trading mode. "
-            "Real order execution via Dhan is disabled. "
-            "All trades are simulated — no real money is ever placed."
-        )
+            "Real order execution is disabled. All trades are simulated.")
+
+    def get_exit_price(self, *args, **kwargs):
+        raise RuntimeError("LIVE ORDER BLOCKED: ASTRA is paper-trading only.")
 
     def get_status(self) -> dict:
-        return {"mode": "LIVE", "paper_trading": False}
+        return {"mode": "BLOCKED", "paper_trading": True}
 
 
-# ── Module singleton — always paper, unconditionally ─────────────────────
+# ── Module singleton ───────────────────────────────────────────────────────
 broker_service = PaperTradingEngine()
-logger.info("Broker mode: PAPER TRADING (permanent — live execution blocked)")
+logger.info("Broker mode: 📝 PAPER TRADING (live orders disabled in code)")
