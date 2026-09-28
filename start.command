@@ -95,7 +95,7 @@ step "Starting ASTRA backend on port 8000…"
 cd "$BACKEND_DIR"
 "$VENV" -m uvicorn main:app \
   --host 0.0.0.0 --port 8000 \
-  --reload \
+  --reload --timeout-graceful-shutdown 3 \
   > "$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 echo $BACKEND_PID > "$LOG_DIR/backend.pid"

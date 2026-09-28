@@ -394,6 +394,9 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
     abortCtrlRef.current = ctrl;
 
     setLoading(true); setError(''); setData(null); setFin(null);
+    // Give up after 45s so a stuck backend shows an error instead of a blank page
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, 45000);
     try {
       const token = localStorage.getItem('astra_token');
       const headers = token ? { Authorization: `Bearer ${token}` } : {};
@@ -414,24 +417,34 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
         if (json.error) throw new Error(json.error);
         payload = json;
       } else {
-        // Route to equity endpoint
-        const [resA, resF] = await Promise.all([
-          fetch(`${API_URL}/api/analyze/${sym}?engine=${eng}`, { headers, signal }),
-          fetch(`${API_URL}/api/financials/${sym}`, { headers, signal }),
-        ]);
+        // Financials load independently — slow or failing fundamentals never block the analysis
+        fetch(`${API_URL}/api/financials/${sym}`, { headers, signal })
+          .then(r => (r.ok ? r.json() : null))
+          .then(fj => { if (fj && abortCtrlRef.current === ctrl) setFin(fj); })
+          .catch(() => {});
+        const resA = await fetch(`${API_URL}/api/analyze/${sym}?engine=${eng}`, { headers, signal });
+        if (resA.status === 401) throw new Error('Session expired — please sign in again.');
         if (!resA.ok) throw new Error(`Server returned ${resA.status}`);
         const json = await resA.json();
         payload = json.result || json;
         if (payload.error) throw new Error(payload.error);
-        try { const fj = await resF.json(); setFin(fj); } catch {}
       }
 
-      setData(payload);
+      if (abortCtrlRef.current === ctrl) setData(payload);
     } catch (e) {
-      if (e.name === 'AbortError') return;  // Silently drop cancelled requests
-      setError(e.message || 'Connection failed');
+      if (abortCtrlRef.current !== ctrl) return;   // superseded by a newer request
+      if (e.name === 'AbortError' || timedOut) {
+        setError('The ASTRA backend did not respond within 45 seconds. Check that it is running (Terminal window from start.command) and try again.');
+      } else if (e instanceof TypeError) {
+        setError(`Cannot reach the ASTRA backend at ${API_URL}. Is it running?`);
+      } else {
+        setError(e.message || 'Connection failed');
+      }
     }
-    finally { setLoading(false); }
+    finally {
+      clearTimeout(timer);
+      if (abortCtrlRef.current === ctrl) setLoading(false);
+    }
   }, [symbol, engine, cryptoMarket]);
 
   const loadInterval = useCallback(async (interval, period) => {
