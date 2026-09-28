@@ -39,6 +39,8 @@ class DhanFeedManager:
         self._last_tick_ts: Optional[datetime] = None
         self._last_error: Optional[str] = None
         self._feed = None
+        self._connects_without_tick = 0
+        self._backoff = _RECONNECT_BACKOFF_SEC
 
     # ── public ───────────────────────────────────────────────────────────
     def subscribe(self, symbol: str) -> bool:
@@ -110,6 +112,7 @@ class DhanFeedManager:
                 self._last_error = "DhanContext unavailable (credentials?)"
                 return
             instruments = [(_NSE_EQ, sid, _TICKER) for sid in self._subscriptions.values()]
+            self._connects_without_tick = 0
             try:
                 feed = MarketFeed(ctx, instruments, version="v2",
                                   on_connect=self._on_connect, on_message=self._on_message,
@@ -122,12 +125,27 @@ class DhanFeedManager:
             finally:
                 self._connected = False
                 self._feed = None
-            self._stop.wait(_RECONNECT_BACKOFF_SEC)
+            # Exponential backoff while the socket keeps dropping without ever
+            # delivering a tick (typically an expired token / no Data API plan).
+            wait = self._backoff
+            self._backoff = min(self._backoff * 2, 1800)
+            logger.warning(f"DhanFeed: no ticks received ({self._last_error or 'connection dropped'}); "
+                           f"retrying in {wait}s. Check DHAN_ACCESS_TOKEN if this persists.")
+            self._stop.wait(wait)
 
     def _on_connect(self, _feed):
         self._connected = True
-        self._last_error = None
-        logger.info("DhanFeed: WebSocket connected")
+        self._connects_without_tick += 1
+        if self._connects_without_tick == 1:
+            logger.info("DhanFeed: WebSocket connected")
+        elif self._connects_without_tick >= 5:
+            # The library reconnects in a tight loop; hand control back to our
+            # backoff loop instead of spamming Dhan (and the log) every second.
+            self._last_error = self._last_error or "server keeps closing the connection"
+            try:
+                _feed._running = False
+            except Exception:
+                pass
 
     def _on_error(self, _feed, err):
         self._last_error = str(err)[:200]
@@ -155,6 +173,8 @@ class DhanFeedManager:
             now = datetime.now()
             self._live_prices[sym] = {"price": price, "ts": now, "source": "dhan_ws"}
             self._last_tick_ts = now
+            self._connects_without_tick = 0
+            self._backoff = _RECONNECT_BACKOFF_SEC
             try:
                 from app.services.market_data import market_data
                 market_data.put_live_price(sym, price, "dhan_ws")

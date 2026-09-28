@@ -653,7 +653,7 @@ _PROVIDERS: dict[str, Callable[[str, int, str], pd.DataFrame]] = {
 _DEPENDS_ON = {"yfinance": "yahoo"}
 
 _CHAINS = {
-    "india_equity":  ["dhan", "upstox", "yahoo", "yfinance", "nse", "twelve_data", "alpha_vantage"],
+    "india_equity":  ["dhan", "yahoo", "upstox", "yfinance", "nse", "twelve_data", "alpha_vantage"],
     "index":         ["yahoo", "yfinance"],
     "crypto":        ["binance", "yahoo", "yfinance", "twelve_data"],
     "futures_fx":    ["yahoo", "yfinance"],
@@ -719,6 +719,35 @@ def _expected_bars(days: int, interval: str, ac: str) -> int:
     if per_day is None:
         return 0      # intraday: don't second-guess provider depth
     return int(days * trading * per_day)
+
+
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _latest_session_date(ac: str):
+    """Date of the most recent trading session that should already have a bar.
+    Crypto trades daily; NSE/BSE-style markets trade Mon–Fri (holidays aren't
+    modelled, so on a holiday every provider looks 'behind' and the best of
+    them is still used)."""
+    now = datetime.utcnow() + _IST_OFFSET
+    d = now.date()
+    if ac == "crypto":
+        return d
+    if now.weekday() < 5 and (now.hour, now.minute) >= (9, 15):
+        return d
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _is_fresh(df: pd.DataFrame, interval: str, ac: str) -> bool:
+    """False when a provider's data stops before the latest session (e.g. Upstox
+    historical candles, which exclude today). Only checked for Indian/crypto
+    series whose session calendar we know; weekly bars are always accepted."""
+    if df.empty or interval == "1wk" or ac not in ("india_equity", "index", "crypto"):
+        return True
+    return pd.Timestamp(df.index[-1]).date() >= _latest_session_date(ac)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -801,7 +830,7 @@ class MarketDataService:
     def _fetch_chain(self, sym: str, days: int, itv: str) -> tuple[pd.DataFrame, Optional[str]]:
         ac = asset_class(sym)
         want = _expected_bars(days, itv, ac)
-        best, best_src = pd.DataFrame(), None
+        candidates = []
         errors = []
         for name in _CHAINS.get(ac, ["yahoo", "yfinance"]):
             if not _is_configured(name) or not HEALTH.available(name, ac):
@@ -824,14 +853,19 @@ class MarketDataService:
                 errors.append(f"{name}: {err.message}")
                 continue
             HEALTH.record_ok(name)
-            logger.info(f"[data] {sym} {itv}/{days}d ← {name}: {len(df)} bars ({time.monotonic() - t0:.1f}s)")
-            if len(df) > len(best):
-                best, best_src = df, name
-            if not want or len(df) >= 0.6 * want:
-                break            # good enough — stop here
-        if best.empty and errors:
-            logger.warning(f"[data] {sym} {itv}: no provider succeeded → " + " | ".join(errors[:4]))
-        return best, best_src
+            fresh = _is_fresh(df, itv, ac)
+            logger.info(f"[data] {sym} {itv}/{days}d ← {name}: {len(df)} bars, last {df.index[-1]}"
+                        f"{'' if fresh else ' (behind latest session)'} ({time.monotonic() - t0:.1f}s)")
+            candidates.append((fresh, df.index[-1], len(df), name, df))
+            if fresh and (not want or len(df) >= 0.6 * want):
+                break            # up to date and deep enough — stop here
+        if not candidates:
+            if errors:
+                logger.warning(f"[data] {sym} {itv}: no provider succeeded → " + " | ".join(errors[:4]))
+            return pd.DataFrame(), None
+        # Prefer: up-to-date > latest last bar > most bars (chain order breaks ties)
+        fresh, _, _, name, df = max(candidates, key=lambda c: (c[0], c[1], c[2]))
+        return df, name
 
     # ── Quotes ─────────────────────────────────────────────────────────────
     def get_quote_info(self, symbol: str, max_age: int = 30) -> dict:

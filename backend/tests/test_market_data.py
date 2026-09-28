@@ -242,3 +242,17 @@ def test_quote_from_yahoo_meta_then_cached(monkeypatch):
     n = len(calls)
     assert market_data.get_quote("TCS.NS") == info["price"]
     assert len(calls) == n
+
+
+def test_provider_missing_latest_session_loses_to_fresh_one(monkeypatch):
+    """Upstox historical candles exclude today; a provider that is up to date must win."""
+    days = pd.bdate_range(end=pd.Timestamp.now() - pd.Timedelta(days=7), periods=400)
+    stale = md._clean(pd.DataFrame({"Close": np.linspace(100, 120, 400)}, index=days))
+    fresh = md._clean(pd.DataFrame({"Close": np.linspace(100, 119, 380)},
+                                   index=pd.bdate_range(end=pd.Timestamp.now(), periods=380)))
+    monkeypatch.setitem(md._CHAINS, "india_equity", ["upstox", "yahoo"])
+    monkeypatch.setattr(md, "_is_configured", lambda n: True)
+    monkeypatch.setitem(md._PROVIDERS, "upstox", lambda s, d, i: stale)
+    monkeypatch.setitem(md._PROVIDERS, "yahoo", lambda s, d, i: fresh)
+    df = market_data.get_ohlcv("RELIANCE", period="2y")
+    assert df.attrs["source"] == "yahoo"
