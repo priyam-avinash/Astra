@@ -55,13 +55,21 @@ sleep 1
 step "Checking dependencies…"
 
 if [ ! -f "$VENV" ]; then
-  fail "Python venv not found at $VENV"
-  echo ""
-  echo "  Run this once to set up the backend:"
-  echo "  cd $BACKEND_DIR && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
-  echo ""
-  read -p "Press Enter to exit…"
-  exit 1
+  # First run: pick the newest supported Python (3.10–3.13) and build the venv
+  PY=""
+  for c in python3.12 python3.11 python3.13 python3.10 python3; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; exit(0 if (3,10) <= sys.version_info[:2] <= (3,13) else 1)' 2>/dev/null; then
+      PY="$(command -v "$c")"; break
+    fi
+  done
+  if [ -z "$PY" ]; then
+    fail "Python 3.10–3.13 not found. Install one (e.g. brew install python@3.12) and re-run."
+    read -p "Press Enter to exit…"; exit 1
+  fi
+  step "Creating backend venv with $("$PY" --version) (first run, takes a few minutes)…"
+  "$PY" -m venv "$BACKEND_DIR/.venv" && "$VENV" -m pip install -q --upgrade pip \
+    && "$VENV" -m pip install -q -r "$BACKEND_DIR/requirements.txt" \
+    || { fail "Backend install failed — see errors above"; read -p "Press Enter to exit…"; exit 1; }
 fi
 ok "Python venv found"
 
