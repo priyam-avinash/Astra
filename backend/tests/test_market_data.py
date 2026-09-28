@@ -62,6 +62,8 @@ def fresh_state(tmp_path, monkeypatch):
     ("BTC-USD", "BTC-USD", "crypto"),
     ("BTC-INR", "BTC-INR", "crypto"),
     ("GC=F", "GC=F", "futures_fx"),
+    ("AAPL", "AAPL", "global_equity"),
+    ("msft", "MSFT", "global_equity"),
 ])
 def test_normalize(raw, expected, cls):
     assert md.normalize_symbol(raw) == expected

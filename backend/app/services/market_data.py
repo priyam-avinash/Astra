@@ -230,6 +230,20 @@ _INDEX_ALIASES = {
 _CRYPTO_QUOTES = ("-USD", "-USDT", "-INR", "-EUR", "-BTC", "-ETH")
 
 
+_NSE_SYMBOLS: Optional[frozenset] = None
+
+
+def _nse_symbols() -> frozenset:
+    global _NSE_SYMBOLS
+    if _NSE_SYMBOLS is None:
+        try:
+            from app.services.dhan_data import _symbols
+            _NSE_SYMBOLS = frozenset(_symbols().keys())
+        except Exception:
+            _NSE_SYMBOLS = frozenset()
+    return _NSE_SYMBOLS
+
+
 def normalize_symbol(symbol: str) -> str:
     s = (symbol or "").strip().upper().replace(" ", "")
     if not s:
@@ -240,7 +254,13 @@ def normalize_symbol(symbol: str) -> str:
         s = s[:-4] + ".BO"
     if s.startswith("^") or "=" in s or "." in s or s.endswith(_CRYPTO_QUOTES):
         return s
-    return s + ".NS"          # bare tickers are NSE equities (incl. BAJAJ-AUTO, M&M)
+    # Bare ticker: NSE equity if it's in the NSE symbol list (Dhan scrip master),
+    # otherwise a global ticker as-is (AAPL, MSFT…). If the list isn't available,
+    # fall back to the old behaviour (assume NSE).
+    nse = _nse_symbols()
+    if nse and s not in nse:
+        return s
+    return s + ".NS"          # e.g. RELIANCE, BAJAJ-AUTO, M&M
 
 
 def asset_class(symbol: str) -> str:
