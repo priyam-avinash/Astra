@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 HTTP_TIMEOUT = float(os.getenv("ASTRA_HTTP_TIMEOUT", "8"))
-DISK_CACHE_DIR = BACKEND_DIR / "data" / "cache"
+from app.core.config import DATA_DIR as _DATA_DIR
+DISK_CACHE_DIR = _DATA_DIR / "cache"
 DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 

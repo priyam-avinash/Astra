@@ -81,8 +81,9 @@ export async function login(username, password) {
     body,
   });
   if (!resp.ok) {
-    const detail = await resp.text();
-    throw new Error(`Login failed: ${detail || resp.statusText}`);
+    let detail = '';
+    try { detail = (await resp.json()).detail; } catch (_) {}
+    throw new Error(detail || (resp.status === 401 ? 'Incorrect email or password' : `Login failed (${resp.status})`));
   }
   const data = await resp.json();
   setToken(data.access_token);
@@ -96,10 +97,43 @@ export async function register(username, password) {
     body: JSON.stringify({ username, password }),
   });
   if (!resp.ok) {
-    const detail = await resp.text();
-    throw new Error(`Registration failed: ${detail || resp.statusText}`);
+    let detail = '';
+    try { detail = (await resp.json()).detail; } catch (_) {}
+    throw new Error(detail || `Registration failed (${resp.status})`);
   }
   return resp.json();
+}
+
+// ── Global fetch patch ───────────────────────────────────────────────────
+// Most views call fetch() directly. Attach the JWT to every same-origin API
+// call (and to API_URL calls) so login works everywhere without touching each
+// view; a 401 on an authenticated call logs the user out.
+const API_PREFIXES = ['/api/', '/brokers', '/strategies', '/upstox'];
+
+function isApiUrl(url) {
+  try {
+    const u = new URL(url, window.location.origin);
+    const sameApiOrigin = u.origin === window.location.origin || (API_URL && url.startsWith(API_URL));
+    return sameApiOrigin && API_PREFIXES.some(p => u.pathname.startsWith(p)) && !u.pathname.startsWith('/api/auth/');
+  } catch (_) { return false; }
+}
+
+export function installAuthFetch() {
+  if (window.__astraFetchPatched) return;
+  window.__astraFetchPatched = true;
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input?.url;
+    const token = getToken();
+    if (token && url && isApiUrl(url)) {
+      const headers = new Headers(init.headers || (typeof input !== 'string' ? input.headers : undefined) || {});
+      if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`);
+      init = { ...init, headers };
+    }
+    const resp = await nativeFetch(input, init);
+    if (resp.status === 401 && token && url && isApiUrl(url)) clearToken();
+    return resp;
+  };
 }
 
 export function logout() {

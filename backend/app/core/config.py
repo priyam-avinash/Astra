@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 BACKEND_DIR = Path(__file__).resolve().parents[2]      # …/backend
 REPO_DIR = BACKEND_DIR.parent                           # …/ (repo root)
 
+# Serverless (Vercel): the code directory is read-only and there is no
+# long-running process, so writable state goes to /tmp and background
+# loops (Dhan feed, position monitor) are replaced by on-request work.
+SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("ASTRA_SERVERLESS"))
+DATA_DIR = Path(os.getenv("ASTRA_DATA_DIR") or ("/tmp/astra-data" if SERVERLESS else BACKEND_DIR / "data"))
+
 
 def _load_env_files() -> list[str]:
     loaded = []

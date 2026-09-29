@@ -113,10 +113,10 @@ class AIPredictionEngine:
 
     def _load_models(self):
         try:
-            rf_path = os.path.join(MODELS_DIR, "astra_rf.joblib")
-            if os.path.exists(rf_path):
-                self.rf_model = joblib.load(rf_path)
-                logger.info("Loaded ASTRA.AI (Random Forest) model.")
+            from app.services.tree_ensemble import load_rf_model
+            self.rf_model = load_rf_model(MODELS_DIR)
+            if self.rf_model is not None:
+                logger.info(f"Loaded ASTRA.AI (Random Forest) model [{type(self.rf_model).__name__}].")
 
             lstm_path = os.path.join(MODELS_DIR, "astra_lstm_equity.keras")
             scaler_path = os.path.join(MODELS_DIR, "astra_lstm_equity_scaler.joblib")

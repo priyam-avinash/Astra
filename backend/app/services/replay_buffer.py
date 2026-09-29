@@ -47,7 +47,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Buffer config
-BUFFER_DIR  = Path(__file__).parent.parent.parent / "data" / "replay_buffer"
+from app.core.config import DATA_DIR as _DATA_DIR
+BUFFER_DIR  = _DATA_DIR / "replay_buffer"
 BUFFER_FILE = BUFFER_DIR / "experiences.jsonl"
 METRICS_FILE = BUFFER_DIR / "engine_metrics.json"
 MAX_BUFFER  = 2000       # Maximum experiences to keep in memory

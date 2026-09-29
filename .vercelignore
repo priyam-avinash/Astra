@@ -1,0 +1,9 @@
+backend/backtest_results
+backend/tests
+backend/.venv
+backend/data/cache
+backend/astra_trading.db
+docs
+frontend/node_modules
+frontend/.vite
+**/__pycache__

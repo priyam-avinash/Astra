@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "cache")
+from app.core.config import DATA_DIR as _DATA_DIR
+CACHE_DIR = str(_DATA_DIR / "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 

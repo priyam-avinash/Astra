@@ -240,6 +240,8 @@ def main():
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         joblib.dump(candidate_rf, RF_CANDIDATE)
         shutil.move(str(RF_CANDIDATE), str(RF_LIVE))
+        from app.services.tree_ensemble import export_forest
+        export_forest(candidate_rf, str(MODEL_DIR / "astra_rf_trees.npz"))   # serverless copy
         logger.info(f"      ✅ Deployed: OOB improved {curr_oob:+.4f} → {new_oob:+.4f}")
         logger.info(f"      Saved to: {RF_LIVE}")
     else:

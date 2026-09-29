@@ -17,6 +17,9 @@ _BROKER_CHECK = {"ok": None, "at": 0.0}
 
 def broker_available() -> bool:
     """Is Redis (Celery broker) reachable? Cached 60s; 1s connect timeout."""
+    from app.core.config import SERVERLESS
+    if SERVERLESS and not os.getenv("REDIS_URL"):
+        return False
     now = time.time()
     if _BROKER_CHECK["ok"] is not None and now - _BROKER_CHECK["at"] < 60:
         return _BROKER_CHECK["ok"]

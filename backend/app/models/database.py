@@ -3,18 +3,41 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
 import os
 
-from app.core.config import BACKEND_DIR
+from app.core.config import BACKEND_DIR, SERVERLESS, DATA_DIR
 
 # SQLite path is anchored to backend/ (it used to be relative to the current
 # working directory, so starting the server from the repo root silently
-# created a second, empty database).
-_DEFAULT_SQLITE = f"sqlite:///{BACKEND_DIR / 'astra_trading.db'}"
+# created a second, empty database). On serverless hosts the code dir is
+# read-only, so the fallback SQLite file lives in /tmp (ephemeral — attach a
+# Postgres database for anything you want to keep).
+_SQLITE_PATH = (DATA_DIR / "astra_trading.db") if SERVERLESS else (BACKEND_DIR / "astra_trading.db")
+_DEFAULT_SQLITE = f"sqlite:///{_SQLITE_PATH}"
 
-DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip().strip('"')
-if not DATABASE_URL or not (DATABASE_URL.startswith("postgresql") or DATABASE_URL.startswith("sqlite")):
-    DATABASE_URL = _DEFAULT_SQLITE
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+def _resolve_database_url() -> str:
+    # Vercel's Postgres/Neon integration exposes POSTGRES_URL / DATABASE_URL.
+    for key in ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"):
+        url = (os.getenv(key) or "").strip().strip('"')
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://"):]
+        if url.startswith("postgresql") or url.startswith("sqlite"):
+            return url
+    if SERVERLESS:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return _DEFAULT_SQLITE
+
+
+DATABASE_URL = _resolve_database_url()
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+
+if IS_SQLITE:
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+elif SERVERLESS:
+    # Each serverless instance is short-lived; don't hold pooled connections.
+    from sqlalchemy.pool import NullPool
+    engine = create_engine(DATABASE_URL, poolclass=NullPool, pool_pre_ping=True)
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
@@ -181,15 +204,17 @@ def _run_migrations():
         ("trade_history",    "entry_features_json", "TEXT"),
         ("trade_history",    "signal_label",        "TEXT"),
     ]
+    from sqlalchemy import text as _sql_text
+    if_not_exists = "" if IS_SQLITE else "IF NOT EXISTS "
     with engine.connect() as conn:
         for table, col, col_type in migrations:
+            if not IS_SQLITE:
+                col_type = col_type.replace("REAL", "DOUBLE PRECISION")
             try:
-                conn.execute(__import__('sqlalchemy').text(
-                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
-                ))
+                conn.execute(_sql_text(f"ALTER TABLE {table} ADD COLUMN {if_not_exists}{col} {col_type}"))
                 conn.commit()
             except Exception:
-                pass  # Column already exists — safe to ignore
+                conn.rollback()  # column already exists (SQLite) — safe to ignore
 
 _run_migrations()
 

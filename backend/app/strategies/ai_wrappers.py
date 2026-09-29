@@ -208,9 +208,10 @@ class AstraAIStrategy(Strategy):
     """
 
     def __init__(self):
-        import joblib
-        model_path = MODELS_DIR / "astra_rf.joblib"
-        self._model = joblib.load(str(model_path))
+        from app.services.tree_ensemble import load_rf_model
+        self._model = load_rf_model(MODELS_DIR)
+        if self._model is None:
+            raise FileNotFoundError("ASTRA.AI model not found in saved_models/")
 
     def meta(self) -> StrategyMeta:
         return StrategyMeta(

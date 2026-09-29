@@ -26,7 +26,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_STATE_PATH = Path(__file__).parent.parent / "data" / "signal_weights.json"
+from app.core.config import SERVERLESS as _SERVERLESS, DATA_DIR as _DATA_DIR
+_STATE_PATH = (_DATA_DIR / "signal_weights.json") if _SERVERLESS else Path(__file__).parent.parent / "data" / "signal_weights.json"
 _WINDOW     = 50          # rolling window size per (engine, symbol)
 _PRIOR_WINS = 3.0         # Beta prior — 3 fake wins (lighter so system learns faster)
 _PRIOR_LOSS = 3.0         # 3 fake losses → start at WR 0.5 with fast updating

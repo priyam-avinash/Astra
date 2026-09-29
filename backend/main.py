@@ -64,6 +64,14 @@ async def lifespan(app: FastAPI):
     if not HAVE_CURL_CFFI:
         logger.warning("curl_cffi not installed — Yahoo may answer HTTP 429. Run: pip install curl_cffi")
 
+    from app.core.config import SERVERLESS
+    if SERVERLESS:
+        # No long-running process on Vercel: no Dhan socket, and the SL/TP
+        # monitor runs on demand when positions are fetched (see endpoints).
+        logger.info("Serverless mode: live feed and background monitor disabled")
+        yield
+        return
+
     # Dhan live price feed (market data only)
     try:
         from app.services.dhan_feed import dhan_feed_manager

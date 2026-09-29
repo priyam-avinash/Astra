@@ -39,7 +39,8 @@ _TOKEN_URL   = "https://api.upstox.com/v2/login/authorization/token"
 _AUTH_URL    = "https://api.upstox.com/v2/login/authorization/dialog"
 _INST_URL    = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 
-_INSTRUMENTS_CACHE_PATH = Path(__file__).parent.parent / "data" / "upstox_instruments.json"
+from app.core.config import SERVERLESS as _SERVERLESS, DATA_DIR as _DATA_DIR
+_INSTRUMENTS_CACHE_PATH = (_DATA_DIR / "upstox_instruments.json") if _SERVERLESS else Path(__file__).parent.parent / "data" / "upstox_instruments.json"
 _INSTRUMENTS_CACHE_TTL  = 86_400  # 24 hours
 
 # Upstox historical intervals and their max lookback in days

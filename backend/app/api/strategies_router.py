@@ -19,6 +19,9 @@ from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
+from fastapi import Depends
+from app.api.endpoints import get_current_user
+
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
 
@@ -50,7 +53,7 @@ async def get_strategy_detail(name: str):
     }
 
 
-@router.post("/{name}/backtest")
+@router.post("/{name}/backtest", dependencies=[Depends(get_current_user)])   # expensive: login required
 async def backtest_strategy(name: str):
     """
     Run the full evaluator on `name`.

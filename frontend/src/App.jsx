@@ -95,8 +95,9 @@ const NAV_GROUPS = [
 
 // ── Main App ──────────────────────────────────────────────────────
 export default function App() {
-  // Auth bypassed for dev — always logged in. Re-enable with isAuthenticated() when ready.
-  const [isLoggedIn, setIsLoggedIn]     = useState(true);
+  // Logged in = a JWT is stored, or the server runs with AUTH_MODE=bypass (local dev).
+  const [isLoggedIn, setIsLoggedIn]     = useState(isAuthenticated());
+  const [authMode, setAuthMode]         = useState(null);   // { mode, registration_open }
   const [authScreen, setAuthScreen]     = useState('login');   // 'login' | 'register'
   const [activeTab, setActiveTab]       = useState('Dashboard');
   const [isSidebarOpen, setSidebarOpen] = useState(true);
@@ -123,16 +124,28 @@ export default function App() {
   // Live price WebSocket
   const { isLive } = useLivePrices();
 
+  // Ask the server whether login is required (bypass = local dev only)
+  useEffect(() => {
+    fetch(`${API_URL}/api/auth/mode`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(m => {
+        if (!m) return;
+        setAuthMode(m);
+        if (m.mode === 'bypass') setIsLoggedIn(true);
+      })
+      .catch(() => {});
+  }, []);
+
   // Auth state sync — listen for explicit changes and storage events (other tabs)
   useEffect(() => {
-    const sync = () => setIsLoggedIn(isAuthenticated());
+    const sync = () => setIsLoggedIn(isAuthenticated() || authMode?.mode === 'bypass');
     window.addEventListener('astra:auth-changed', sync);
     window.addEventListener('storage', sync);
     return () => {
       window.removeEventListener('astra:auth-changed', sync);
       window.removeEventListener('storage', sync);
     };
-  }, []);
+  }, [authMode]);
 
   // Market open timer
   useEffect(() => {
@@ -275,7 +288,8 @@ export default function App() {
     }
     return (
       <LoginView
-        onLogin={() => setIsLoggedIn(true)}
+        registrationOpen={authMode ? authMode.registration_open : true}
+        onLogin={() => window.location.reload()}   /* reload so every view refetches with the new token */
         onSwitchToRegister={() => setAuthScreen('register')}
       />
     );

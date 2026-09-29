@@ -146,24 +146,60 @@ class UserCreate(BaseModel):
     username: str
     password: str
 
+def _allowed_users() -> set:
+    raw = os.getenv("ASTRA_ALLOWED_USERS", "")
+    return {u.strip().lower() for u in raw.split(",") if u.strip()}
+
+
+def _registration_open(db: Session) -> bool:
+    """Who may create an account.
+
+    ASTRA_ALLOWED_USERS (comma-separated usernames/emails) → only those.
+    Otherwise, on a hosted/serverless deploy only the very first account can
+    be created (the owner) and registration then closes, so a public URL
+    can't be used by strangers. Local servers stay open unless
+    ASTRA_OPEN_REGISTRATION=false.
+    """
+    from app.core.config import env_flag, SERVERLESS
+    if _allowed_users():
+        return True
+    if env_flag("ASTRA_OPEN_REGISTRATION", not SERVERLESS):
+        return True
+    real_users = db.query(User).filter(User.username != "admin_bypass").count()
+    return real_users == 0
+
+
+@router.get("/api/auth/mode")
+def auth_mode(db: Session = Depends(get_db)):
+    return {"mode": _AUTH_MODE, "registration_open": _registration_open(db)}
+
+
 @router.post("/api/auth/register")
 async def register(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.username == user.username).first()
-    if db_user:
+    username = (user.username or "").strip().lower()
+    if not username or len(user.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Enter an email and a password of at least 8 characters")
+    allowed = _allowed_users()
+    if allowed and username not in allowed:
+        raise HTTPException(status_code=403, detail="Registration is restricted on this server")
+    if not allowed and not _registration_open(db):
+        raise HTTPException(status_code=403, detail="Registration is closed on this server")
+    if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
-    
-    hashed_password = get_password_hash(user.password)
-    new_user = User(username=user.username, hashed_password=hashed_password)
+
+    new_user = User(username=username, hashed_password=get_password_hash(user.password))
     db.add(new_user)
     db.commit()
     return {"message": "User registered successfully"}
 
 @router.post("/api/auth/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    name = (form_data.username or "").strip()
+    user = (db.query(User).filter(User.username == name).first()
+            or db.query(User).filter(User.username == name.lower()).first())
+    if not user or user.username == "admin_bypass" or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
-    
+
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -360,7 +396,7 @@ def get_financials(symbol: str, current_user: User = Depends(get_current_user)):
         }
 
 @router.get("/api/analyze/status/{task_id}")
-def get_analysis_status(task_id: str):
+def get_analysis_status(task_id: str, current_user: User = Depends(get_current_user)):
     """
     Polls the status of a specific analysis task.
     """

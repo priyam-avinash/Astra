@@ -107,6 +107,8 @@ def train_rf(ai_engine, df):
     if model:
         path = os.path.join(MODELS_DIR, "astra_rf.joblib")
         joblib.dump(model, path)
+        from app.services.tree_ensemble import export_forest
+        export_forest(model, os.path.join(MODELS_DIR, "astra_rf_trees.npz"))   # serverless copy
         logger.info(f"✅ Saved Random Forest → {path}")
         return True
     else:

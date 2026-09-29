@@ -3,7 +3,7 @@ import { Lock, Mail, ArrowRight, Loader } from 'lucide-react';
 
 import { login } from './auth';
 
-export default function LoginView({ onLogin, onSwitchToRegister }) {
+export default function LoginView({ onLogin, onSwitchToRegister, registrationOpen = true }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -85,15 +85,15 @@ export default function LoginView({ onLogin, onSwitchToRegister }) {
           </button>
         </form>
 
-        <div style={{ marginTop: '32px', textAlign: 'center', fontSize: '0.85rem', color: 'rgba(255,255,255,0.3)' }}>
+        {registrationOpen && <div style={{ marginTop: '32px', textAlign: 'center', fontSize: '0.85rem', color: 'rgba(255,255,255,0.3)' }}>
           Don't have an account? {' '}
           <button 
             onClick={onSwitchToRegister}
             style={{ background: 'none', border: 'none', color: 'var(--color-primary)', fontWeight: 600, cursor: 'pointer', padding: 0 }}
           >
-            Create one for free
+            Create one
           </button>
-        </div>
+        </div>}
       </div>
     </div>
   );

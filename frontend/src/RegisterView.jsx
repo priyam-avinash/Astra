@@ -16,6 +16,10 @@ export default function RegisterView({ onRegister, onSwitchToLogin }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (formData.password.length < 8) {
+      setError('Use at least 8 characters for the password');
+      return;
+    }
     if (formData.password !== formData.confirmPassword) {
       setError('Passwords do not match');
       return;
@@ -23,7 +27,7 @@ export default function RegisterView({ onRegister, onSwitchToLogin }) {
     setLoading(true);
     setError('');
     try {
-      await register(formData.username, formData.password);
+      await register(formData.email.trim().toLowerCase(), formData.password);
       setSuccess(true);
       setTimeout(() => onSwitchToLogin(), 2000);
     } catch (err) {
@@ -60,22 +64,6 @@ export default function RegisterView({ onRegister, onSwitchToLogin }) {
         </div>
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div>
-            <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>USERNAME</label>
-            <div style={{ position: 'relative' }}>
-              <User size={16} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'rgba(255,255,255,0.2)' }} />
-              <input 
-                type="text" 
-                className="search-input" 
-                placeholder="trader_sky"
-                value={formData.username}
-                onChange={(e) => setFormData({...formData, username: e.target.value})}
-                style={{ width: '100%', paddingLeft: '40px', background: 'rgba(255,255,255,0.03)' }}
-                required 
-              />
-            </div>
-          </div>
-
           <div>
             <label style={{ display: 'block', marginBottom: '8px', fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>EMAIL ADDRESS</label>
             <div style={{ position: 'relative' }}>

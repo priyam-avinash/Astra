@@ -1,0 +1,23 @@
+# Vercel serverless backend (lite). Local/full installs use backend/requirements.txt.
+# Left out to fit Vercel's 500 MB Python bundle: TensorFlow (ASTRA.ML falls back
+# to rules), scikit-learn/SciPy (ASTRA.AI runs from a numpy export of the forest),
+# ccxt, Celery workers.
+fastapi>=0.110,<0.120
+python-multipart>=0.0.9
+pydantic>=2.5
+python-dotenv>=1.0.1
+sqlalchemy>=2.0.29
+psycopg2-binary>=2.9.9
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0,<4.1
+python-jose[cryptography]>=3.3.0
+celery>=5.3.6
+redis>=5.0.3
+pandas>=2.1,<3
+numpy>=1.26,<2.2
+pytz>=2024.1
+requests>=2.31.0
+curl_cffi>=0.7
+yfinance>=0.2.58
+joblib>=1.3.0
+dhanhq>=2.0.2
