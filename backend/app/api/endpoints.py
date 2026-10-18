@@ -1548,3 +1548,50 @@ def portfolio_summary(db: Session = Depends(get_db), current_user: User = Depend
         "day_pnl_pct": round(day_pnl / (value - day_pnl) * 100, 2) if value - day_pnl else 0.0,
         "mode": "PAPER",
     }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  DATA EXPORT (local only) — dumps OHLCV history to backend/data/export/*.csv
+#  for offline model training and backtests on machines without market access.
+# ════════════════════════════════════════════════════════════════════════════
+
+class ExportRequest(BaseModel):
+    symbols: List[str]
+    period: str = "10y"
+    interval: str = "1d"
+    provider: Optional[str] = None      # e.g. "yahoo" to bypass the chain (deeper crypto history)
+
+
+@router.post("/api/data/export")
+def export_ohlcv(req: ExportRequest, current_user: User = Depends(get_current_user)):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.core.config import SERVERLESS, BACKEND_DIR
+    from app.services import market_data as md
+    if SERVERLESS:
+        raise HTTPException(status_code=404, detail="Not available on hosted deploys")
+    out_dir = BACKEND_DIR / "data" / "export"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    interval = md.norm_interval(req.interval)
+    days = md.period_days(req.period)
+
+    def one(sym: str):
+        s = md.normalize_symbol(sym)
+        try:
+            if req.provider:
+                df = md._clean(md._PROVIDERS[req.provider](s, days, interval))
+                src = req.provider
+            else:
+                df = md.market_data.get_ohlcv(s, period=req.period, interval=interval)
+                src = df.attrs.get("source")
+            if df is None or df.empty:
+                return sym, 0, None, "no data"
+            safe = s.replace("^", "IDX_").replace("=", "_F").replace("/", "_")
+            df.to_csv(out_dir / f"{safe}__{interval}.csv")
+            return sym, len(df), str(df.index[0])[:10], src
+        except Exception as e:
+            return sym, 0, None, f"{type(e).__name__}: {str(e)[:80]}"
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(one, req.symbols))
+    return {"dir": str(out_dir), "interval": interval, "period": req.period,
+            "results": [{"symbol": s, "bars": n, "first": f, "source": src} for s, n, f, src in rows]}
