@@ -21,3 +21,5 @@ node_modules/
 backend/data/
 .logs/
 !.env.example
+backend/models_oos/
+backend/scripts/out/

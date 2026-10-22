@@ -39,6 +39,18 @@ logger = logging.getLogger(__name__)
 
 TRADE_NOTIONAL = 100_000   # ₹1L per trade — fixed for comparability
 
+# Evaluation window (v1.14). HISTORY_PERIOD is how much daily data is loaded
+# (indicators need warm-up); TRADE_START/TRADE_END restrict *entries* to an
+# out-of-sample window, e.g. the period after the models' training cutoff.
+EVAL_WINDOW: dict = {"history_period": "2y", "trade_start": None, "trade_end": None}
+
+
+def set_eval_window(history_period: str = "2y", trade_start=None, trade_end=None) -> None:
+    EVAL_WINDOW.update(history_period=history_period,
+                       trade_start=pd.Timestamp(trade_start) if trade_start else None,
+                       trade_end=pd.Timestamp(trade_end) if trade_end else None)
+    clear_universe_cache()
+
 
 # ── Single-symbol backtest runner ─────────────────────────────────────────
 
@@ -58,12 +70,18 @@ def _simulate_symbol(strategy: Strategy, symbol: str, df: pd.DataFrame,
     trades: list[Trade] = []
     position: Optional[Position] = None
 
+    t_start, t_end = EVAL_WINDOW.get("trade_start"), EVAL_WINDOW.get("trade_end")
+    idx_naive = enriched.index.tz_localize(None) if getattr(enriched.index, "tz", None) is not None else enriched.index
+
     for i in range(1, len(enriched) - 1):
         bars_up_to_now = enriched.iloc[: i + 1]
         row = enriched.iloc[i]
         nxt = enriched.iloc[i + 1]
 
         if position is None:
+            ts = idx_naive[i]
+            if (t_start is not None and ts < t_start) or (t_end is not None and ts > t_end):
+                continue
             sig = strategy.signal(bars_up_to_now, symbol)
             if sig is None:
                 continue
@@ -97,10 +115,10 @@ def _simulate_symbol(strategy: Strategy, symbol: str, df: pd.DataFrame,
         exit_reason: Optional[ExitReason] = None
         exit_price_raw: Optional[float] = None
 
-        # 1. Hard stop (intrabar)
+        # 1. Hard stop (intrabar). A gap below the stop fills at the open, not the stop.
         if position.hard_stop is not None and low <= position.hard_stop:
             exit_reason = ExitReason.HARD_STOP
-            exit_price_raw = position.hard_stop
+            exit_price_raw = min(position.hard_stop, float(row["Open"]))
 
         # 2. Target (intrabar)
         elif position.target is not None and high >= position.target:
@@ -257,9 +275,10 @@ def _fetch_2y_daily(symbol: str) -> Optional[pd.DataFrame]:
     management that is thread-safe unlike yf.download() batch mode.
     Falls back to Upstox when available.
     """
+    import os
     try:
         from app.services.upstox_data import upstox_service
-        if upstox_service.is_available():
+        if not os.getenv("ASTRA_OFFLINE_DATA_DIR") and upstox_service.is_available():
             df = upstox_service.get_ohlcv(symbol, period="2y", interval="1d")
             if df is not None and not df.empty and len(df) > 200:
                 return df
@@ -268,7 +287,7 @@ def _fetch_2y_daily(symbol: str) -> Optional[pd.DataFrame]:
     # v1.13: shared market-data layer (Yahoo via curl_cffi, fallbacks, cache)
     try:
         from app.services.market_data import market_data
-        df = market_data.get_ohlcv(f"{symbol}.NS", period="2y", interval="1d")
+        df = market_data.get_ohlcv(f"{symbol}.NS", period=EVAL_WINDOW.get("history_period", "2y"), interval="1d")
         if len(df) > 200:
             return df.copy()
     except Exception:

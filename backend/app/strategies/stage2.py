@@ -152,7 +152,7 @@ def _load_nifty_regime() -> Optional[pd.DataFrame]:
     # v1.13: shared market-data layer (fast-failing, cached)
     try:
         from app.services.market_data import market_data
-        raw = market_data.get_ohlcv("^NSEI", period="2y", interval="1d")
+        raw = market_data.get_ohlcv("^NSEI", period="10y", interval="1d")
         if len(raw) >= SMA_PERIOD + 30:
             df = raw[["Close"]].sort_index().copy()
             df["SMA"] = df["Close"].rolling(SMA_PERIOD).mean()

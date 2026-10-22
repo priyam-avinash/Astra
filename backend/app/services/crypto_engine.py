@@ -441,7 +441,7 @@ class CryptoEngine:
             elif engine == "astra_crypto_ml":
                 if self.lstm_model is not None and self.lstm_scaler is not None:
                     try:
-                        lookback = 20  # Matches new classifier lookback
+                        lookback = int(self.lstm_model.input_shape[1])  # whatever the model was trained with
                         feat_data = df[CRYPTO_FEATURE_COLS].tail(lookback).values
                         if len(feat_data) == lookback:
                             scaled = self.lstm_scaler.transform(feat_data)
@@ -593,7 +593,7 @@ class CryptoEngine:
 
     # ─────────────────────── LSTM TRAINING ───────────────────────
 
-    def train_lstm_crypto(self, symbols: list = None, lookback: int = 20):
+    def train_lstm_crypto(self, symbols: list = None, lookback: int = 20, limit: int = 4000):
         """
         Train dedicated Bidirectional LSTM for crypto.
         Trains on multiple coins simultaneously for generalization.
@@ -611,11 +611,11 @@ class CryptoEngine:
 
             DIRECTION_THRESHOLD = 1.5  # % — moves below this are NEUTRAL
 
-            all_X, all_y = [], []
+            tr_X, tr_y, va_X, va_y = [], [], [], []
 
             for sym in symbols:
                 logger.info(f"Fetching crypto training data for {sym}...")
-                df_raw = self.fetch_data(sym, market="international", timeframe="1d", limit=800)
+                df_raw = self.fetch_data(sym, market="international", timeframe="1d", limit=limit)
                 if df_raw.empty:
                     continue
                 df = self._compute_features(df_raw)
@@ -629,28 +629,28 @@ class CryptoEngine:
                 df = df.dropna(subset=CRYPTO_FEATURE_COLS + ["Target"])
                 df["Target"] = df["Target"].astype(int)
 
-                for i in range(lookback, len(df) - 1):
-                    all_X.append(df[CRYPTO_FEATURE_COLS].values[i - lookback:i])
-                    all_y.append(df["Target"].values[i])
+                # Drop the last 3 rows: their 3-day forward return isn't known yet
+                vals, tgt = df[CRYPTO_FEATURE_COLS].values, df["Target"].values
+                seq_X = [vals[i - lookback:i] for i in range(lookback, len(df) - 3)]
+                seq_y = [tgt[i] for i in range(lookback, len(df) - 3)]
+                # Chronological 80/20 split PER COIN (the old split over the
+                # concatenation used whole coins as validation, not later dates)
+                cut = int(len(seq_X) * 0.8)
+                tr_X += seq_X[:cut]; tr_y += seq_y[:cut]
+                va_X += seq_X[cut:]; va_y += seq_y[cut:]
 
-            if len(all_X) < 100:
+            if len(tr_X) < 100 or not va_X:
                 logger.error("Not enough crypto training data across symbols.")
                 return None, None
 
-            X_arr = np.array(all_X)
-            y_arr = np.array(all_y)
-
-            n_samples, n_steps, n_feats = X_arr.shape
-
-            # Chronological split before scaling (no data leakage)
-            split = int(n_samples * 0.8)
-            X_train_raw, X_val_raw = X_arr[:split], X_arr[split:]
-            y_train, y_val = y_arr[:split], y_arr[split:]
+            X_train_raw, y_train = np.array(tr_X), np.array(tr_y)
+            X_val_raw, y_val = np.array(va_X), np.array(va_y)
+            _, n_steps, n_feats = X_train_raw.shape
 
             # Fit scaler only on train data
             scaler = RobustScaler()
-            X_train = scaler.fit_transform(X_train_raw.reshape(-1, n_feats)).reshape(split, n_steps, n_feats)
-            X_val = scaler.transform(X_val_raw.reshape(-1, n_feats)).reshape(n_samples - split, n_steps, n_feats)
+            X_train = scaler.fit_transform(X_train_raw.reshape(-1, n_feats)).reshape(len(X_train_raw), n_steps, n_feats)
+            X_val = scaler.transform(X_val_raw.reshape(-1, n_feats)).reshape(len(X_val_raw), n_steps, n_feats)
 
             # ── BiLSTM Classifier (3-class: DOWN/NEUTRAL/UP) ──
             inputs = tf.keras.Input(shape=(lookback, n_feats))

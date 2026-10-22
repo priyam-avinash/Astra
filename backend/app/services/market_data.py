@@ -812,6 +812,8 @@ class MarketDataService:
         days = period_days(period)
         if not sym:
             return pd.DataFrame(columns=OHLCV)
+        if os.getenv("ASTRA_OFFLINE_DATA_DIR"):
+            return self._offline_ohlcv(sym, itv, days)
         key = (sym, itv)
 
         cached = self._mem.get(key)
@@ -847,6 +849,37 @@ class MarketDataService:
 
         self.last_source[sym] = {"source": None, "stale": True, "at": datetime.now().isoformat(timespec="seconds")}
         return pd.DataFrame(columns=OHLCV)
+
+    def _offline_ohlcv(self, sym: str, itv: str, days: int) -> pd.DataFrame:
+        """Reproducible training/backtests: serve bars from exported CSVs
+        (POST /api/data/export) instead of live providers.
+
+        ASTRA_OFFLINE_DATA_DIR  folder of <SYMBOL>__<interval>.csv files
+        ASTRA_OFFLINE_ASOF      optional YYYY-MM-DD; bars after it are hidden
+                                (simulates "today" for out-of-sample tests)
+        """
+        folder = Path(os.environ["ASTRA_OFFLINE_DATA_DIR"])
+        safe = sym.replace("^", "IDX_").replace("=", "_F").replace("/", "_")
+        path = folder / f"{safe}__{itv}.csv"
+        key = ("offline", sym, itv)
+        df = self._mem.get(key)
+        if df is None:
+            if not path.exists():
+                return pd.DataFrame(columns=OHLCV)
+            try:
+                raw = pd.read_csv(path, index_col=0, parse_dates=True)
+                df = _clean(raw)
+            except Exception as e:
+                logger.warning(f"[offline] {path.name}: {e}")
+                return pd.DataFrame(columns=OHLCV)
+            self._mem[key] = df
+        asof = os.getenv("ASTRA_OFFLINE_ASOF")
+        if asof:
+            cutoff = pd.Timestamp(asof) + pd.Timedelta(days=1)
+            if df.index.tz is not None:
+                cutoff = cutoff.tz_localize(df.index.tz)
+            df = df[df.index < cutoff]
+        return self._tag(self._slice(df, days), sym, "offline", False)
 
     def _fetch_chain(self, sym: str, days: int, itv: str) -> tuple[pd.DataFrame, Optional[str]]:
         ac = asset_class(sym)

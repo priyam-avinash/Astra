@@ -427,10 +427,10 @@ def test_astra1_rsi_exactly_50_does_not_pass():
 
 def test_training_universe_has_83_symbols():
     """Training universe must match the evaluator universe (83 symbols)."""
-    import importlib.util
+    import importlib.util, os
     spec = importlib.util.spec_from_file_location(
         "train_models",
-        "/Users/avinashpriyam/Desktop/trading-app/react-algo-trading-app/backend/train_models.py"
+        os.path.join(os.path.dirname(__file__), "..", "train_models.py")
     )
     mod = importlib.util.module_from_spec(spec)
     try:

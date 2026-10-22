@@ -25,7 +25,7 @@ _NIFTY_50 = [
     "BAJFINANCE", "KOTAKBANK", "BHARTIARTL", "LT", "AXISBANK", "ASIANPAINT",
     "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "NESTLEIND",
     "ADANIENT", "POWERGRID", "TECHM", "INDUSINDBK", "DIVISLAB", "JSWSTEEL",
-    "BAJAJFINSV", "COALINDIA", "HCLTECH", "ONGC", "NTPC", "M&M", "TATAMOTORS",
+    "BAJAJFINSV", "COALINDIA", "HCLTECH", "ONGC", "NTPC", "M&M", "TMPV",
     "TATASTEEL", "CIPLA", "BRITANNIA", "DRREDDY", "BPCL", "HEROMOTOCO",
     "GRASIM", "EICHERMOT", "TATACONSUM", "SBILIFE", "HDFCLIFE", "UPL",
     "APOLLOHOSP", "HINDALCO", "ADANIPORTS", "BAJAJ-AUTO", "VEDL", "ITC",
@@ -40,12 +40,12 @@ _NIFTY_NEXT_50 = [
     "IDFCFIRSTB", "FEDERALBNK", "CANBK", "PNBHOUSING", "PNB", "UNIONBANK",
     "BANKBARODA", "GAIL", "IOC", "PETRONET", "CONCOR", "NHPC", "SJVN",
     "TRENTLTD", "AUROPHARMA", "LUPIN", "BIOCON", "CADILAHC", "ALKEM",
-    "TORNTPOWER", "TATACOMM", "MPHASIS", "LTIM", "PERSISTENT",
+    "TORNTPOWER", "TATACOMM", "MPHASIS", "LTM", "PERSISTENT",
 ]
 
 # MIDCAP additions
 _MIDCAP = [
-    "NYKAA", "PAYTM", "ZOMATO", "POLICYBZR", "IRFC", "RVNL", "HUDCO",
+    "NYKAA", "PAYTM", "ETERNAL", "POLICYBZR", "IRFC", "RVNL", "HUDCO",
     "MOTHERSON", "ASHOKLEY", "ESCORTS", "SONACOMS", "KPITTECH", "TIINDIA",
     "LALPATHLAB", "METROPOLIS", "AAVAS", "HOMEFIRST", "SBFC", "FIVESTAR",
     "CREDITACC", "JMFINANCIL", "CHOICEIN", "ANGELONE", "CDSL", "BSE", "MCX",
@@ -91,7 +91,7 @@ _SECTOR_MAP = {
     "ONGC.NS":        "Energy",
     "NTPC.NS":        "Power",
     "M&M.NS":         "Auto",
-    "TATAMOTORS.NS":  "Auto",
+    "TMPV.NS":  "Auto",
     "TATASTEEL.NS":   "Steel",
     "CIPLA.NS":       "Pharma",
     "BRITANNIA.NS":   "FMCG",
@@ -150,7 +150,7 @@ _SECTOR_MAP = {
     "TATACOMM.NS":    "Telecom",
     "INDUSTOWER.NS":  "Telecom",
     "MPHASIS.NS":     "IT",
-    "LTIM.NS":        "IT",
+    "LTM.NS":        "IT",
     "PERSISTENT.NS":  "IT",
     "TATAELXSI.NS":   "IT",
     "LTTS.NS":        "IT",
@@ -158,7 +158,7 @@ _SECTOR_MAP = {
     "INDIAMART.NS":   "IT",
     # MIDCAP
     "NYKAA.NS":       "Consumer",
-    "ZOMATO.NS":      "Consumer",
+    "ETERNAL.NS":      "Consumer",
     "PAYTM.NS":       "NBFC",
     "POLICYBZR.NS":   "Insurance",
     "DELHIVERY.NS":   "Logistics",

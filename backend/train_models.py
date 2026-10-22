@@ -159,7 +159,7 @@ def train_lstm_crypto(crypto_engine, symbols: list):
     logger.info("=" * 50)
     logger.info("Training ASTRA.CRYPTO.ML (Bidirectional LSTM — multi-coin)")
     logger.info("=" * 50)
-    model, scaler = crypto_engine.train_lstm_crypto(symbols=symbols, lookback=30)
+    model, scaler = crypto_engine.train_lstm_crypto(symbols=symbols, lookback=20)
     if model and scaler:
         model_path = os.path.join(MODELS_DIR, "astra_lstm_crypto.keras")
         scaler_path = os.path.join(MODELS_DIR, "astra_lstm_crypto_scaler.joblib")

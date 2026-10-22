@@ -58,6 +58,8 @@ def _discover_first_party() -> None:
             # Skip if defined in a different module (e.g. re-imported helpers)
             if cls.__module__ != full_name:
                 continue
+            if _name.startswith("_"):              # private base classes (e.g. _LiveEngineStrategy)
+                continue
             try:
                 meta: StrategyMeta = cls().meta()
             except Exception as e:

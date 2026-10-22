@@ -31,7 +31,11 @@ FEATURE_COLS = [
     "Volat_Ratio", "Volume_Ratio", "OBV_Slope", "Candle_Body_Ratio", "Lower_Shadow_Ratio",
 ]
 
-MODELS_DIR = pathlib.Path(__file__).parents[2] / "app" / "models" / "saved_models"
+import os as _os
+# ASTRA_MODELS_DIR lets the evaluator load held-out ("trained before the test
+# window") models instead of the production ones.
+MODELS_DIR = pathlib.Path(_os.getenv("ASTRA_MODELS_DIR") or
+                          pathlib.Path(__file__).parents[2] / "app" / "models" / "saved_models")
 
 # ── Shared time stop ──────────────────────────────────────────────────────────
 _AI_TIME_STOP_DAYS = 84   # 60 trading-day cap ≈ 84 calendar days
@@ -118,74 +122,117 @@ def _has_features(row: pd.Series) -> bool:
     return True
 
 
-# ── 1. ASTRA 1.0 — 4/6 rule-based ────────────────────────────────────────────
+# ── Live-parity wrappers ──────────────────────────────────────────────────────
+# v1.14: the three engines are backtested through ai_engine.decide() — the same
+# function the live /api/analyze endpoint uses — on features from the live
+# _compute_features(). Market regime (NIFTY vs SMA200) and the weekly-trend
+# filter are rebuilt per date without look-ahead. Long-only: the evaluator
+# trades BUY signals (positional shorting isn't available in Indian cash equity).
 
-class Astra1Strategy(Strategy):
-    """
-    Backtestable wrapper for the ASTRA 1.0 rule-based engine.
-    Replicates the 4/6 multi-confirmation BUY logic from ai_predictor.py.
-    Macro/network calls are excluded (backtests must be deterministic).
-    """
+_NIFTY_BULL: Optional[pd.Series] = None
+
+
+def _nifty_bull_series() -> pd.Series:
+    """Date → NIFTY close above its 200-day SMA (the live macro filter)."""
+    global _NIFTY_BULL
+    if _NIFTY_BULL is None:
+        from app.services.market_data import market_data
+        n = market_data.get_ohlcv("^NSEI", period="10y", interval="1d")
+        if len(n) >= 200:
+            c = n["Close"].sort_index()
+            c.index = _naive(c.index)
+            _NIFTY_BULL = (c > c.rolling(200).mean()).astype(bool)
+        else:
+            _NIFTY_BULL = pd.Series(dtype=bool)
+    return _NIFTY_BULL
+
+
+def _naive(idx):
+    idx = pd.DatetimeIndex(idx)
+    return idx.tz_localize(None) if idx.tz is not None else idx
+
+
+def _weekly_trend_series(close: pd.Series) -> pd.Series:
+    """Live _get_weekly_trend() per day without look-ahead: weekly SMA10/SMA30
+    from completed weeks plus the current day's close as the running week."""
+    c = close.copy()
+    c.index = _naive(c.index)
+    wk_label = c.index.to_period("W-FRI")
+    weekly = c.groupby(wk_label).last()
+    prev9 = weekly.rolling(9).sum().shift(1)       # 9 completed weeks before this one
+    prev29 = weekly.rolling(29).sum().shift(1)
+    s10 = (prev9.reindex(wk_label).values + c.values) / 10.0
+    s30 = (prev29.reindex(wk_label).values + c.values) / 30.0
+    bull = (c.values > s30) & (s10 > s30)
+    bear = (c.values < s30) & (s10 < s30)
+    out = np.where(bull, "BULL", np.where(bear, "BEAR", "NEUTRAL"))
+    out = np.where(np.isnan(s30), "NEUTRAL", out)
+    return pd.Series(out, index=close.index)
+
+
+class _LiveEngineStrategy(Strategy):
+    ENGINE = "astra"
+    NAME = "ASTRA.1.0"
+    DESCRIPTION = ""
+    TAGS: list = []
+    MIN_BARS = 210
 
     def meta(self) -> StrategyMeta:
         return StrategyMeta(
-            name="ASTRA.1.0",
-            version="1.0.0",
-            description="4/6 multi-confirmation rule-based system (backtestable wrapper)",
-            timeframe=StrategyTimeframe.DAILY,
-            asset_class="EQUITY",
-            long_only=True,
-            owner="ASTRA",
-            tags=["rule-based", "multi-confirmation", "ai-wrapper"],
+            name=self.NAME, version="2.0.0", description=self.DESCRIPTION,
+            timeframe=StrategyTimeframe.DAILY, asset_class="EQUITY", long_only=True,
+            owner="ASTRA", tags=list(self.TAGS) + ["ai-wrapper", "live-parity"],
         )
 
+    def _models(self):
+        """Override to supply (rf_model, lstm_model, lstm_scaler)."""
+        return None, None, None
+
+    def _extra_columns(self, df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        return df
+
     def precompute(self, bars: pd.DataFrame) -> pd.DataFrame:
-        return _shared_precompute(bars)
+        from app.services.ai_predictor import ai_engine
+        bars = bars.sort_index()
+        feats = ai_engine._compute_features(bars)
+        if feats.empty:
+            return feats
+        # keep every input bar (warm-up rows just have NaN features → no signal)
+        df = feats.reindex(bars.index)
+        for c in ("Open", "High", "Low", "Close", "Volume"):
+            df[c] = bars[c]
+        df["ATR14"] = df["ATR"] if "ATR" in df.columns else compute_atr(df, 14)
+        bull = _nifty_bull_series()
+        if len(bull):
+            df["_macro_bull"] = bull.reindex(_naive(df.index), method="pad").fillna(True).values
+        else:
+            df["_macro_bull"] = True
+        df["_weekly"] = _weekly_trend_series(df["Close"]).values
+        return df
 
     def signal(self, bars: pd.DataFrame, symbol: str) -> Optional[Signal]:
-        if len(bars) < 210:
+        from app.services.ai_predictor import ai_engine
+        if len(bars) < self.MIN_BARS:
             return None
         row = bars.iloc[-1]
-        if not _has_features(row):
+        if row[FEATURE_COLS].isna().any():
             return None
-
-        close = float(row["Close"])
-        atr   = float(row["ATR14"])
-
-        # Replicate the 6 rule-based confirmations from ai_predictor.py
-        # (macro/network calls removed for deterministic backtesting)
-        # Note: RSI threshold relaxed to 40 (live uses 35; 35+SMA200>0 almost never co-occurs)
-        checks = [
-            # 1. RSI oversold & turning up (relaxed from 35 → 40 for backtest viability)
-            float(row["RSI"]) < 40 and float(row["RSI_Slope"]) > 0,
-            # 2. Price above SMA200 + trending (ADX>20)
-            float(row["Dist_SMA200"]) > 0 and float(row["ADX"]) > 20,
-            # 3. MACD bullish (line above signal)
-            float(row["MACD"]) > float(row["MACD_Signal"]),
-            # 4. Volume surge (>1.5× 20-day avg)
-            float(row["Volume_Ratio"]) > 1.5,
-            # 5. Bullish candle (close > open = positive body)
-            float(row["Close"]) > float(row["Open"]),
-            # 6. Near lower Bollinger Band (oversold zone)
-            float(row["BB_PctB"]) < 0.35,
-        ]
-        passed = sum(checks)
-        if passed < 4:
+        rf_pred = float(row["_rf_pred"]) if "_rf_pred" in bars.columns and pd.notna(row.get("_rf_pred")) else None
+        ml_probs = None
+        if "P_UP" in bars.columns:
+            if pd.isna(row.get("P_UP")):
+                return None
+            ml_probs = [float(row["P_DOWN"]), float(row["P_NEUTRAL"]), float(row["P_UP"])]
+        side, confidence, m_sl, m_tp = ai_engine.decide(
+            self.ENGINE, bars.tail(40), symbol, bool(row["_macro_bull"]), str(row["_weekly"]),
+            rf_pred=rf_pred, ml_probs=ml_probs)
+        if side != "BUY":
             return None
-
-        hard_stop = close - 1.5 * atr
-        target    = close + 3.0 * atr
+        close, atr = float(row["Close"]), float(row["ATR14"])
         return Signal(
-            symbol=symbol,
-            side=SignalSide.BUY,
-            entry_price=close,
-            timestamp=bars.index[-1],
-            hard_stop=hard_stop,
-            target=target,
-            trail_pct=None,
-            trail_activate_pct=0.0,
-            confidence=round(passed / 6 * 100, 1),
-            size_fraction=1.0,
+            symbol=symbol, side=SignalSide.BUY, entry_price=close, timestamp=bars.index[-1],
+            hard_stop=close - m_sl * atr, target=close + m_tp * atr,
+            trail_pct=None, trail_activate_pct=0.0, confidence=round(confidence, 1), size_fraction=1.0,
         )
 
     def should_exit(self, position: Position, bars: pd.DataFrame) -> Optional[ExitReason]:
@@ -195,161 +242,66 @@ class Astra1Strategy(Strategy):
         return None
 
 
-# ── 2. ASTRA.AI — Random Forest ───────────────────────────────────────────────
+class Astra1Strategy(_LiveEngineStrategy):
+    """ASTRA 1.0 — 4/7 multi-confirmation rules (exact live logic)."""
+    ENGINE, NAME = "astra", "ASTRA.1.0"
+    DESCRIPTION = "4/7 multi-confirmation rule-based system (live-parity backtest)"
+    TAGS = ["rule-based", "multi-confirmation"]
 
-class AstraAIStrategy(Strategy):
-    """
-    Backtestable wrapper for the ASTRA.AI Random Forest engine.
-    Loads the saved RF model from saved_models/astra_rf.joblib.
-    Predicts 5-day forward return; enters BUY when prediction exceeds threshold.
 
-    NOTE: RF was trained on data overlapping the evaluation window.
-    Results are an upper-bound estimate (in-sample optimism applies).
-    """
+class AstraAIStrategy(_LiveEngineStrategy):
+    """ASTRA.AI — Random Forest 5-day return model (exact live decision rule)."""
+    ENGINE, NAME = "astra_ai", "ASTRA.AI"
+    DESCRIPTION = "Random Forest 5-day return predictor (live-parity backtest)"
+    TAGS = ["ml", "random-forest"]
+    MIN_BARS = 230
 
     def __init__(self):
         from app.services.tree_ensemble import load_rf_model
         self._model = load_rf_model(MODELS_DIR)
         if self._model is None:
-            raise FileNotFoundError("ASTRA.AI model not found in saved_models/")
-
-    def meta(self) -> StrategyMeta:
-        return StrategyMeta(
-            name="ASTRA.AI",
-            version="1.0.0",
-            description="Random Forest 5-day return predictor (backtestable wrapper)",
-            timeframe=StrategyTimeframe.DAILY,
-            asset_class="EQUITY",
-            long_only=True,
-            owner="ASTRA",
-            tags=["ml", "random-forest", "ai-wrapper"],
-        )
+            raise FileNotFoundError(f"ASTRA.AI model not found in {MODELS_DIR}")
 
     def precompute(self, bars: pd.DataFrame) -> pd.DataFrame:
-        return _shared_precompute(bars)
+        df = super().precompute(bars)
+        if df.empty:
+            return df
+        ok = df[FEATURE_COLS].notna().all(axis=1)
+        df["_rf_pred"] = np.nan
+        if ok.any():
+            df.loc[ok, "_rf_pred"] = self._model.predict(df.loc[ok, FEATURE_COLS].values)
+        return df
 
-    def signal(self, bars: pd.DataFrame, symbol: str) -> Optional[Signal]:
-        if len(bars) < 230:
-            return None
-        row = bars.iloc[-1]
-        if not _has_features(row):
-            return None
-
-        close   = float(row["Close"])
-        atr     = float(row["ATR14"])
-        atr_pct = float(row["Volat_Ratio"])
-
-        X    = pd.DataFrame([row[FEATURE_COLS]])
-        pred = float(self._model.predict(X)[0])
-
-        # Dynamic threshold: at minimum 1.2%, or half the daily ATR%
-        threshold = max(1.2, atr_pct * 0.5)
-        if pred <= threshold:
-            return None
-
-        hard_stop  = close - 1.6 * atr
-        target     = close + 4.0 * atr
-        confidence = min(abs(pred) * 18.0, 99.0)
-
-        return Signal(
-            symbol=symbol,
-            side=SignalSide.BUY,
-            entry_price=close,
-            timestamp=bars.index[-1],
-            hard_stop=hard_stop,
-            target=target,
-            trail_pct=None,
-            trail_activate_pct=0.0,
-            confidence=round(confidence, 1),
-            size_fraction=1.0,
-        )
-
-    def should_exit(self, position: Position, bars: pd.DataFrame) -> Optional[ExitReason]:
-        days_in = (bars.index[-1] - position.entry_ts).days
-        if days_in >= _AI_TIME_STOP_DAYS:
-            return ExitReason.TIME_STOP
-        return None
+    def signal(self, bars, symbol):
+        from app.services.ai_predictor import ai_engine
+        ai_engine.rf_model = self._model          # decide() checks a model is loaded
+        return super().signal(bars, symbol)
 
 
-# ── 3. ASTRA.ML — Bidirectional LSTM ─────────────────────────────────────────
-
-class AstraMLStrategy(Strategy):
-    """
-    Backtestable wrapper for the ASTRA.ML Bidirectional LSTM engine.
-    Loads saved_models/astra_lstm_equity.keras + astra_lstm_equity_scaler.joblib.
-    Uses a 30-bar lookback window; predicts 3-day forward return.
-
-    NOTE: LSTM was trained on data overlapping the evaluation window.
-    Results are an upper-bound estimate (in-sample optimism applies).
-    """
-
-    LOOKBACK = 30
+class AstraMLStrategy(_LiveEngineStrategy):
+    """ASTRA.ML — 3-class BiLSTM (exact live decision rule)."""
+    ENGINE, NAME = "astra_ml", "ASTRA.ML"
+    DESCRIPTION = "3-class BiLSTM 20-day direction model (live-parity backtest)"
+    TAGS = ["ml", "lstm"]
 
     def __init__(self):
         import joblib
-        import tensorflow as tf  # noqa: F401 — lazy import so non-ML setups skip TF
-        self._model  = tf.keras.models.load_model(str(MODELS_DIR / "astra_lstm_equity.keras"))
+        from app.services.model_compat import load_keras_model
+        from app.services.ai_predictor import _get_luong_attention_cls
+        self._model = load_keras_model(str(MODELS_DIR / "astra_lstm_equity.keras"),
+                                       custom_objects={"LuongAttention": _get_luong_attention_cls()})
         self._scaler = joblib.load(str(MODELS_DIR / "astra_lstm_equity_scaler.joblib"))
-
-    def meta(self) -> StrategyMeta:
-        return StrategyMeta(
-            name="ASTRA.ML",
-            version="1.0.0",
-            description="Bidirectional LSTM 3-day return predictor (backtestable wrapper)",
-            timeframe=StrategyTimeframe.DAILY,
-            asset_class="EQUITY",
-            long_only=True,
-            owner="ASTRA",
-            tags=["ml", "lstm", "ai-wrapper"],
-        )
+        if int(self._model.output_shape[-1]) != 3:
+            raise ValueError("ASTRA.ML model is not a 3-class classifier — retrain it")
+        self.LOOKBACK = int(self._model.input_shape[1])
+        self.MIN_BARS = 210 + self.LOOKBACK
+        self._symbol_hint = None
 
     def precompute(self, bars: pd.DataFrame) -> pd.DataFrame:
-        return _shared_precompute(bars)
-
-    def signal(self, bars: pd.DataFrame, symbol: str) -> Optional[Signal]:
-        if len(bars) < 210 + self.LOOKBACK:
-            return None
-        row = bars.iloc[-1]
-        if row[FEATURE_COLS].isna().any():
-            return None
-
-        close   = float(row["Close"])
-        atr     = float(row["ATR14"])
-        atr_pct = float(row["Volat_Ratio"])
-
-        # Build 30-bar feature matrix
-        feat_data = bars[FEATURE_COLS].iloc[-self.LOOKBACK:].values
-        if feat_data.shape[0] < self.LOOKBACK:
-            return None
-
-        scaled = self._scaler.transform(feat_data)
-        X = scaled.reshape(1, self.LOOKBACK, len(FEATURE_COLS))
-        pred = float(self._model.predict(X, verbose=0)[0][0])
-
-        # Dynamic threshold: at minimum 0.55%, or 35% of daily ATR%
-        threshold = max(0.55, atr_pct * 0.35)
-        if pred <= threshold:
-            return None
-
-        hard_stop  = close - 1.5 * atr
-        target     = close + 3.5 * atr
-        confidence = min(abs(pred) * 25.0, 99.0)
-
-        return Signal(
-            symbol=symbol,
-            side=SignalSide.BUY,
-            entry_price=close,
-            timestamp=bars.index[-1],
-            hard_stop=hard_stop,
-            target=target,
-            trail_pct=None,
-            trail_activate_pct=0.0,
-            confidence=round(confidence, 1),
-            size_fraction=1.0,
-        )
-
-    def should_exit(self, position: Position, bars: pd.DataFrame) -> Optional[ExitReason]:
-        days_in = (bars.index[-1] - position.entry_ts).days
-        if days_in >= _AI_TIME_STOP_DAYS:
-            return ExitReason.TIME_STOP
-        return None
+        from app.services.ai_predictor import lstm_predict_proba_series
+        df = super().precompute(bars)
+        if df.empty:
+            return df
+        sym = bars.attrs.get("symbol", "") if hasattr(bars, "attrs") else ""
+        probs = lstm_predict_proba_series(self._model, self._scaler, sym, df)
+        return df.join(probs, how="left")

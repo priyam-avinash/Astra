@@ -57,6 +57,29 @@ TIME_STOP_DAYS       = 40          # reverted to v3.2 best
 
 WIN_PROB             = 0.45
 
+USE_SECTOR_FILTER    = True        # skip setups whose sector is below its own 50-day average
+SECTOR_SMA_DAYS      = 50
+SECTOR_MIN_MEMBERS   = 2           # need ≥2 stocks to form a sector average
+
+
+def _build_sector_map() -> dict:
+    """NSE symbol (no suffix) → upper-case sector, from the scanner's sector table."""
+    try:
+        from app.services.universe_scanner import _SECTOR_MAP as scanner_map
+        out = {k.replace(".NS", "").upper(): v.upper() for k, v in scanner_map.items()}
+    except Exception:
+        out = {}
+    out.update({   # universe members the scanner table doesn't cover
+        "DMART": "CONSUMER", "TRENT": "CONSUMER", "INDIGO": "LOGISTICS", "DLF": "REALTY",
+        "AUROPHARMA": "PHARMA", "IRFC": "NBFC", "RVNL": "INFRASTRUCTURE", "POLYCAB": "ENGINEERING",
+        "TIINDIA": "AUTO", "KPITTECH": "IT", "INDIANB": "BANKING", "LTM": "IT", "LTIM": "IT",
+        "TMPV": "AUTO", "TATAMOTORS": "AUTO", "ETERNAL": "CONSUMER", "ZOMATO": "CONSUMER",
+    })
+    return out
+
+
+SECTOR_MAP: dict = _build_sector_map()
+
 # ── NIFTY regime cache ────────────────────────────────────────────────────────
 _NIFTY_CACHE: Optional[pd.DataFrame] = None
 
@@ -68,7 +91,7 @@ def _nifty_above_ema200(date) -> bool:
         # v1.13: shared market-data layer (fast-failing, cached)
         try:
             from app.services.market_data import market_data
-            raw = market_data.get_ohlcv("^NSEI", period="2y", interval="1d")
+            raw = market_data.get_ohlcv("^NSEI", period="10y", interval="1d")
             if len(raw) >= 210:
                 df = raw[["Close"]].sort_index().copy()
                 df["EMA200"] = compute_ema(df["Close"], 200)
@@ -100,8 +123,46 @@ def _nifty_above_ema200(date) -> bool:
         return True
 
 
+# Back-compat name used by tests/older callers (the regime check uses EMA200).
+_nifty_above_sma200 = _nifty_above_ema200
+
+
 class PullbackStrategy(Strategy):
-    """Buy pullbacks to EMA50 in Supertrend-confirmed uptrends. v3.0: wider zone, Supertrend exit."""
+    """Buy pullbacks to EMA20 in Supertrend-confirmed uptrends, with market and sector regime gates."""
+
+    def __init__(self):
+        # sector → boolean Series (equal-weight sector index above its SMA50), set by prepare_universe
+        self._sector_above_sma50: dict = {}
+
+    def prepare_universe(self, universe_data: dict) -> None:
+        """Build an equal-weight index per sector and flag the days it trades above its SMA50."""
+        by_sector: dict = {}
+        for sym, df in universe_data.items():
+            sector = SECTOR_MAP.get(str(sym).replace(".NS", "").upper())
+            if sector is None or df is None or len(df) < SECTOR_SMA_DAYS + 5:
+                continue
+            close = df["Close"].sort_index()
+            close = close[~close.index.duplicated(keep="last")]
+            by_sector.setdefault(sector, []).append(close / close.iloc[0])
+        out = {}
+        for sector, series in by_sector.items():
+            if len(series) < SECTOR_MIN_MEMBERS:
+                continue
+            idx = pd.concat(series, axis=1).sort_index().ffill().mean(axis=1)
+            out[sector] = (idx > idx.rolling(SECTOR_SMA_DAYS).mean()).astype(bool)
+        self._sector_above_sma50 = out
+
+    def _sector_ok(self, symbol: str, date) -> bool:
+        """Fail-open when the sector is unknown or has no history yet."""
+        sector = SECTOR_MAP.get(str(symbol).replace(".NS", "").upper())
+        series = self._sector_above_sma50.get(sector) if sector else None
+        if series is None or series.empty:
+            return True
+        try:
+            i = series.index.get_indexer([date], method="pad")[0]
+            return True if i < 0 else bool(series.iloc[i])
+        except Exception:
+            return True
 
     def meta(self) -> StrategyMeta:
         return StrategyMeta(
@@ -191,7 +252,11 @@ class PullbackStrategy(Strategy):
             return None
 
         # 8. NIFTY market regime
-        if USE_NIFTY_REGIME and not _nifty_above_ema200(bars.index[-1]):
+        if USE_NIFTY_REGIME and not _nifty_above_sma200(bars.index[-1]):
+            return None
+
+        # 9. Sector regime: the stock's sector must be above its own 50-day average
+        if USE_SECTOR_FILTER and not self._sector_ok(symbol, bars.index[-1]):
             return None
 
         # Fixed target + hard stop → mean-reversion bounce capture

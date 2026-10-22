@@ -17,6 +17,7 @@ import logging
 import os
 import joblib
 import numpy as np
+from typing import Optional
 import pandas as pd
 from datetime import datetime
 import warnings
@@ -99,6 +100,67 @@ def _get_luong_attention_cls():
     return LuongAttention
 
 
+# ── ASTRA.ML inference helpers (3-class BiLSTM) ───────────────────────────────
+# Decision thresholds on the model's class probabilities, tuned on the
+# out-of-sample validation window (see backend/scripts/evaluate_engines.py).
+ML_PROB_MIN = 0.45      # P(UP) (or P(DOWN)) must reach this …
+ML_EDGE_MIN = 0.10      # … and beat the opposite class by this margin
+
+
+def lstm_scaler_for(scaler_obj, symbol: str, feats: pd.DataFrame, lookback: int):
+    """Per-symbol RobustScaler from the training dict; for symbols the model
+    never saw, fit one on that symbol's own history (excluding the input window)."""
+    if scaler_obj is None:
+        return None
+    if not isinstance(scaler_obj, dict):
+        return scaler_obj                       # legacy single scaler
+    key = str(symbol).upper().replace(".NS", "").replace(".BO", "")
+    if key in scaler_obj:
+        return scaler_obj[key]
+    from sklearn.preprocessing import RobustScaler
+    hist = feats.iloc[:-lookback] if len(feats) > lookback + 120 else feats
+    return RobustScaler().fit(hist[FEATURE_COLS].values)
+
+
+def lstm_predict_proba(model, scaler_obj, symbol: str, feats: pd.DataFrame):
+    """[P_DOWN, P_NEUTRAL, P_UP] for the latest bar, or None if unavailable."""
+    if model is None or scaler_obj is None:
+        return None
+    lookback = int(model.input_shape[1])
+    f = feats[FEATURE_COLS].dropna()
+    if len(f) < lookback:
+        return None
+    scaler = lstm_scaler_for(scaler_obj, symbol, f, lookback)
+    X = scaler.transform(f.tail(lookback).values).reshape(1, lookback, len(FEATURE_COLS))
+    out = model.predict(X, verbose=0)[0]
+    return np.asarray(out, dtype=float)
+
+
+def lstm_predict_proba_series(model, scaler_obj, symbol: str, feats: pd.DataFrame) -> pd.DataFrame:
+    """Batch version of lstm_predict_proba: P_DOWN/P_NEUTRAL/P_UP for every row
+    that has a full lookback window (used by backtests; same scaling rules)."""
+    lookback = int(model.input_shape[1])
+    f = feats[FEATURE_COLS].dropna()
+    if len(f) < lookback + 1:
+        return pd.DataFrame(columns=["P_DOWN", "P_NEUTRAL", "P_UP"])
+    scaler = lstm_scaler_for(scaler_obj, symbol, f, lookback)
+    Z = scaler.transform(f.values)
+    idx = np.arange(lookback, len(f) + 1)
+    X = np.stack([Z[i - lookback:i] for i in idx])
+    P = model.predict(X, verbose=0, batch_size=1024)
+    return pd.DataFrame(P, index=f.index[idx - 1], columns=["P_DOWN", "P_NEUTRAL", "P_UP"])
+
+
+def ml_decision(probs) -> tuple:
+    """(signal, confidence%) from 3-class probabilities."""
+    p_down, _p_neu, p_up = (float(x) for x in probs)
+    if p_up >= ML_PROB_MIN and p_up - p_down >= ML_EDGE_MIN:
+        return "BUY", round(p_up * 100, 1)
+    if p_down >= ML_PROB_MIN and p_down - p_up >= ML_EDGE_MIN:
+        return "SELL", round(p_down * 100, 1)
+    return "HOLD", round(max(p_up, p_down) * 100, 1)
+
+
 class AIPredictionEngine:
     def __init__(self):
         logger.info("Initialized ASTRA Equity Engine v3.0 (20-feature multi-confirmation system)")
@@ -178,6 +240,98 @@ class AIPredictionEngine:
                 trend = "BEAR"
             cache[symbol] = (trend, now)
         return trend
+
+    # ─────────────────────── ENGINE DECISION (shared by live + backtests) ───────────────────────
+
+    def decide(self, engine: str, df: pd.DataFrame, asset_symbol: str,
+               macro_bull: bool, weekly_trend: str, patterns: Optional[dict] = None,
+               rf_pred: Optional[float] = None, ml_probs=None) -> tuple:
+        """Signal for the LAST row of a feature DataFrame (from _compute_features).
+
+        Returns (signal, confidence, sl_atr_mult, tp_atr_mult). This is the single
+        source of truth for ASTRA 1.0 / ASTRA.AI / ASTRA.ML decisions: the live
+        analysis endpoint and the backtest wrappers both call it, so backtests
+        measure exactly what the app does.
+        """
+        last = df.iloc[-1]
+        if patterns is None:
+            patterns = self._detect_candlestick_patterns(df.tail(5))
+        signal = "HOLD"
+        confidence = 50.0
+        mult_sl, mult_tp = 1.5, 3.0  # Default ATR multipliers (2:1 R:R minimum)
+
+        # ── ASTRA 1.0 (Rule-Based Multi-Confirmation) ──
+        if engine == "astra":
+            buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
+            sell_ok, sell_conf, _ = self._check_sell_confirmations(last, patterns)
+
+            if buy_ok and buy_conf > sell_conf:
+                signal, confidence = "BUY", buy_conf
+                # MTF filter: suppress BUY if weekly is bearish
+                if weekly_trend == "BEAR":
+                    signal = "HOLD"
+                    confidence = round(confidence * 0.6, 1)
+            elif sell_ok and sell_conf > buy_conf:
+                signal, confidence = "SELL", sell_conf
+                # MTF filter: suppress SELL if weekly is bullish
+                if weekly_trend == "BULL":
+                    signal = "HOLD"
+                    confidence = round(confidence * 0.6, 1)
+            else:
+                confidence = max(buy_conf, sell_conf)
+
+        # ── ASTRA.AI (Random Forest — trust the model) ──
+        elif engine == "astra_ai":
+            mult_sl, mult_tp = 1.6, 4.0
+            if self.rf_model is not None or rf_pred is not None:
+                try:
+                    if rf_pred is not None:            # precomputed (batch backtests)
+                        pred = float(rf_pred)
+                    else:
+                        feats = df[FEATURE_COLS].tail(1)
+                        pred = float(self.rf_model.predict(feats)[0])
+                    atr_pct = float(last["Volat_Ratio"])
+                    threshold = max(1.2, atr_pct * 0.5)
+                    confidence = float(round(min(abs(pred) * 18.0, 99.0), 1))
+                    if pred > threshold:
+                        signal = "BUY"
+                        # Block BUY if macro bear OR weekly bear
+                        if not macro_bull or weekly_trend == "BEAR":
+                            signal = "HOLD"
+                            confidence *= 0.5
+                    elif pred < -threshold:
+                        signal = "SELL"
+                        if weekly_trend == "BULL":
+                            signal = "HOLD"
+                            confidence *= 0.5
+                except Exception as e:
+                    logger.warning(f"RF model inference failed: {e}")
+                    buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
+                    if buy_ok:
+                        signal, confidence = "BUY", buy_conf
+
+        # ── ASTRA.ML (Bidirectional LSTM, 3-class: DOWN / NEUTRAL / UP) ──
+        elif engine == "astra_ml":
+            mult_sl, mult_tp = 1.5, 3.5
+            probs = ml_probs                           # precomputed (batch backtests)
+            try:
+                if probs is None:
+                    probs = lstm_predict_proba(self.lstm_model, self.lstm_scaler, asset_symbol, df)
+            except Exception as e:
+                logger.warning(f"LSTM inference failed: {e}")
+            if probs is not None and len(probs) == 3:
+                signal, confidence = ml_decision(probs)
+                if signal == "BUY" and (not macro_bull or weekly_trend == "BEAR"):
+                    signal, confidence = "HOLD", round(confidence * 0.6, 1)
+                elif signal == "SELL" and weekly_trend == "BULL":
+                    signal, confidence = "HOLD", round(confidence * 0.6, 1)
+            else:
+                # No usable model → rule-based confirmations (ASTRA 1.0 logic)
+                buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
+                if buy_ok:
+                    signal, confidence = "BUY", buy_conf
+
+        return signal, float(confidence), mult_sl, mult_tp
 
     # ─────────────────────── DATA FETCHING ───────────────────────
 
@@ -457,98 +611,15 @@ class AIPredictionEngine:
             patterns = self._detect_candlestick_patterns(df)
             macro_bull = self._is_macro_bullish()
 
-            # ---- Market Regime ----
-            # ADX < 20: choppy/ranging → prefer mean reversion (RSI extremes)
-            # ADX >= 20: trending → prefer momentum/breakout
-            is_trending = float(last["ADX"]) >= 20
-
-            signal = "HOLD"
-            confidence = 50.0
-            mult_sl, mult_tp = 1.5, 3.0  # Default ATR multipliers (2:1 R:R minimum)
-
             # ── Multi-Timeframe Weekly Trend ──
             # Only filter equity symbols (skip indices/crypto which use their own macro filters)
             weekly_trend = "NEUTRAL"
             if not any(c in asset_symbol for c in ["^", "-USD", "-INR", "=F"]):
                 weekly_trend = self._get_weekly_trend(asset_symbol)
 
-            # ── ASTRA 1.0 (Rule-Based Multi-Confirmation) ──
-            if engine == "astra":
-                buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
-                sell_ok, sell_conf, _ = self._check_sell_confirmations(last, patterns)
-
-                if buy_ok and buy_conf > sell_conf:
-                    signal, confidence = "BUY", buy_conf
-                    # MTF filter: suppress BUY if weekly is bearish
-                    if weekly_trend == "BEAR":
-                        signal = "HOLD"
-                        confidence = round(confidence * 0.6, 1)
-                elif sell_ok and sell_conf > buy_conf:
-                    signal, confidence = "SELL", sell_conf
-                    # MTF filter: suppress SELL if weekly is bullish
-                    if weekly_trend == "BULL":
-                        signal = "HOLD"
-                        confidence = round(confidence * 0.6, 1)
-                else:
-                    confidence = max(buy_conf, sell_conf)
-
-            # ── ASTRA.AI (Random Forest — trust the model) ──
-            elif engine == "astra_ai":
-                mult_sl, mult_tp = 1.6, 4.0
-                if self.rf_model is not None:
-                    try:
-                        feats = df[FEATURE_COLS].tail(1)
-                        pred = float(self.rf_model.predict(feats)[0])
-                        atr_pct = float(last["Volat_Ratio"])
-                        threshold = max(1.2, atr_pct * 0.5)
-                        confidence = float(round(min(abs(pred) * 18.0, 99.0), 1))
-                        if pred > threshold:
-                            signal = "BUY"
-                            # Block BUY if macro bear OR weekly bear
-                            if not macro_bull or weekly_trend == "BEAR":
-                                signal = "HOLD"
-                                confidence *= 0.5
-                        elif pred < -threshold:
-                            signal = "SELL"
-                            if weekly_trend == "BULL":
-                                signal = "HOLD"
-                                confidence *= 0.5
-                    except Exception as e:
-                        logger.warning(f"RF model inference failed: {e}")
-                        buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
-                        if buy_ok:
-                            signal, confidence = "BUY", buy_conf
-
-            # ── ASTRA.ML (Bidirectional LSTM) ──
-            elif engine == "astra_ml":
-                mult_sl, mult_tp = 1.5, 3.5
-                if self.lstm_model is not None and self.lstm_scaler is not None:
-                    try:
-                        lookback = 30
-                        feat_data = df[FEATURE_COLS].tail(lookback).values
-                        if len(feat_data) == lookback:
-                            scaled = self.lstm_scaler.transform(feat_data)
-                            X = scaled.reshape(1, lookback, len(FEATURE_COLS))
-                            pred = float(self.lstm_model.predict(X, verbose=0)[0][0])
-                            atr_pct = float(last["Volat_Ratio"])
-                            # Lowered from 0.8 → 0.55 to unlock more trades while keeping quality
-                            threshold = max(0.55, atr_pct * 0.35)
-                            confidence = float(round(min(abs(pred) * 25.0, 99.0), 1))
-                            if pred > threshold:
-                                signal = "BUY"
-                                if not macro_bull or weekly_trend == "BEAR":
-                                    signal = "HOLD"
-                                    confidence *= 0.6
-                            elif pred < -threshold:
-                                signal = "SELL"
-                                if weekly_trend == "BULL":
-                                    signal = "HOLD"
-                                    confidence *= 0.6
-                    except Exception as e:
-                        logger.warning(f"LSTM inference failed: {e}")
-                        buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
-                        if buy_ok:
-                            signal, confidence = "BUY", buy_conf
+            signal, confidence, mult_sl, mult_tp = self.decide(
+                engine, df, asset_symbol, macro_bull, weekly_trend, patterns)
+            is_trending = float(last["ADX"]) >= 20
 
             # ── ATR-Based SL/TP (all engines) ──
             entry_p = float(round(lp, 2))
@@ -652,25 +723,47 @@ class AIPredictionEngine:
 
     # ─────────────────────── MODEL TRAINING HELPERS ───────────────────────
 
-    def train_model_rf(self, df: pd.DataFrame):
-        """Train RandomForest on 20-feature equity data. Returns fitted model."""
+    def build_rf_dataset(self, data, horizon: int = 5):
+        """Features + 5-day forward-return target, computed PER SYMBOL.
+
+        `data` is {symbol: OHLCV DataFrame} (or one DataFrame for a single
+        symbol). Rolling indicators and forward returns are never computed
+        across symbol boundaries — the old concatenated version leaked one
+        stock's prices into the next stock's features and targets.
+        Returns a DataFrame with FEATURE_COLS, Target and Symbol, sorted by date.
+        """
+        frames = data.items() if isinstance(data, dict) else [("ALL", data)]
+        parts = []
+        for sym, raw in frames:
+            if raw is None or len(raw) < 260:
+                continue
+            f = self._compute_features(raw)
+            if f.empty:
+                continue
+            f = f.copy()
+            f["Target"] = f["Close"].pct_change(horizon).shift(-horizon) * 100
+            f["Symbol"] = sym
+            parts.append(f.dropna(subset=FEATURE_COLS + ["Target"]))
+        if not parts:
+            return pd.DataFrame()
+        return pd.concat(parts).sort_index()
+
+    def train_model_rf(self, data, n_estimators: int = 200):
+        """Train the ASTRA.AI RandomForest regressor (5-day forward return, %)."""
         from sklearn.ensemble import RandomForestRegressor
-        df = self._compute_features(df)
-        if df.empty or len(df) < 50:
+        ds = data if (isinstance(data, pd.DataFrame) and "Target" in data.columns) else self.build_rf_dataset(data)
+        if ds.empty or len(ds) < 50:
             logger.error("Not enough data to train RF model")
             return None
 
-        # Target: 5-day forward return (what we're predicting)
-        df["Target"] = df["Close"].pct_change(5).shift(-5) * 100
-        df = df.dropna(subset=FEATURE_COLS + ["Target"])
-
-        X = df[FEATURE_COLS].values
-        y = df["Target"].values
+        X = ds[FEATURE_COLS].values
+        y = ds["Target"].values
 
         model = RandomForestRegressor(
-            n_estimators=200,
+            n_estimators=n_estimators,
             max_depth=8,
-            min_samples_leaf=20,
+            min_samples_leaf=50,
+            max_features=0.5,
             random_state=42,
             n_jobs=-1,
             oob_score=True,
@@ -688,6 +781,8 @@ class AIPredictionEngine:
         lookback: int = 30,
         target_days: int = 20,        # 20-day return → aligned with 40-day hold period
         label_threshold_pct: float = 1.5,
+        stride: int = 1,              # keep every Nth training window (neighbours are near-duplicates)
+        epochs: int = 60,
     ):
         """
         Build and train 3-class BiLSTM with Luong Attention.
@@ -743,10 +838,13 @@ class AIPredictionEngine:
                     continue
                 X_seq, y_seq = np.array(X_seq), np.array(y_seq)
 
-                # Chronological 80/20 split
+                # Chronological 80/20 split, with a target_days gap so validation
+                # labels never overlap the training labels' forward windows
                 split = int(len(X_seq) * 0.8)
-                X_tr_raw, X_val_raw = X_seq[:split], X_seq[split:]
-                y_tr,     y_val     = y_seq[:split], y_seq[split:]
+                X_tr_raw, X_val_raw = X_seq[:split][::stride], X_seq[split + target_days:]
+                y_tr,     y_val     = y_seq[:split][::stride], y_seq[split + target_days:]
+                if len(X_val_raw) == 0:
+                    continue
 
                 if len(X_tr_raw) < 10:
                     continue
@@ -800,15 +898,15 @@ class AIPredictionEngine:
             )
 
             callbacks = [
-                tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True),
-                tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5, min_lr=1e-6),
+                tf.keras.callbacks.EarlyStopping(patience=6, restore_best_weights=True),
+                tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=3, min_lr=1e-6),
             ]
 
             model.fit(
                 X_train, y_train,
                 validation_data=(X_val, y_val),
-                epochs=60,
-                batch_size=64,
+                epochs=epochs,
+                batch_size=128,
                 callbacks=callbacks,
                 verbose=1,
             )
