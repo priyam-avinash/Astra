@@ -5,8 +5,7 @@ import {
   Menu, X, Bell, User, LogOut, Activity, LayoutDashboard,
   DollarSign, Bitcoin, Telescope, TrendingUp, TrendingDown,
   Package, ChevronRight, Search, RefreshCw, AlertCircle,
-  ArrowUpRight, ArrowDownRight, Minus, Timer, Layers
-} from 'lucide-react';
+  ArrowUpRight, ArrowDownRight, Minus, Timer, Layers, Landmark } from 'lucide-react';
 import AIPredictionsView  from './AIPredictionsView';
 import AutoModeView       from './AutoModeView';
 import PortfolioView      from './PortfolioView';
@@ -20,6 +19,7 @@ import CryptoView         from './CryptoView';
 import IntradayView       from './IntradayView';
 import StrategiesView     from './StrategiesView';
 import CommoditiesView    from './CommoditiesView';
+import MutualFundsView    from './MutualFundsView';
 import LoginView          from './LoginView';
 import RegisterView       from './RegisterView';
 
@@ -66,6 +66,7 @@ const NAV_GROUPS = [
       { id: 'Scanner',      name: 'Universe Scan', icon: <Telescope      size={16} /> },
       { id: 'Intraday',     name: 'Intraday',      icon: <Timer          size={16} /> },
       { id: 'Commodities',  name: 'Commodities',   icon: <Package        size={16} /> },
+      { id: 'Mutual Funds', name: 'Mutual Funds',  icon: <Landmark       size={16} /> },
     ]
   },
   {
@@ -249,6 +250,8 @@ export default function App() {
         return <StrategiesView />;
       case 'Commodities':
         return <CommoditiesView setQueue={setQueue} />;
+      case 'Mutual Funds':
+        return <MutualFundsView />;
       case 'AI Predictions':
         return <AIPredictionsView queue={queue} setQueue={setQueue} />;
       case 'Auto Mode':

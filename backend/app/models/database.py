@@ -171,6 +171,55 @@ class BrokerCredential(Base):
     updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class MFHolding(Base):
+    """Paper mutual-fund holding (one row per user × scheme)."""
+    __tablename__ = "mf_holdings"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), index=True)
+    scheme_code = Column(String, index=True)
+    scheme_name = Column(String)
+    units       = Column(Float, default=0.0)
+    invested    = Column(Float, default=0.0)      # cost basis of units still held (₹)
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MFTransaction(Base):
+    """Paper MF transaction log (BUY / SIP / SELL) — NAV-dated like a real fund."""
+    __tablename__ = "mf_transactions"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id"), index=True)
+    scheme_code = Column(String, index=True)
+    scheme_name = Column(String)
+    kind        = Column(String)                  # BUY | SIP | SELL
+    amount      = Column(Float)                   # ₹ (positive)
+    units       = Column(Float)
+    nav         = Column(Float)
+    nav_date    = Column(String)                  # YYYY-MM-DD of the NAV used
+    sip_id      = Column(Integer, nullable=True)
+    realised_pnl = Column(Float, nullable=True)   # SELL only
+    created_at  = Column(DateTime, default=datetime.utcnow)
+
+
+class MFSip(Base):
+    """Paper SIP mandate. Instalments are booked lazily (at that day's NAV)
+    whenever the MF portfolio is opened, so it works on serverless too."""
+    __tablename__ = "mf_sips"
+
+    id            = Column(Integer, primary_key=True, index=True)
+    user_id       = Column(Integer, ForeignKey("users.id"), index=True)
+    scheme_code   = Column(String, index=True)
+    scheme_name   = Column(String)
+    amount        = Column(Float)
+    day_of_month  = Column(Integer)               # 1–28
+    start_date    = Column(String)                # YYYY-MM-DD
+    last_run_date = Column(String, nullable=True) # last instalment date booked
+    active        = Column(Boolean, default=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+
+
 Base.metadata.create_all(bind=engine)
 
 # ── SQLite column-migration helper (dev only) ─────────────────────────

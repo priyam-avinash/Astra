@@ -13,6 +13,7 @@ from app.api.websockets import router as ws_router
 from app.api.upstox_router import router as upstox_router
 from app.api.strategies_router import router as strategies_router
 from app.api.brokers_router import router as brokers_router
+from app.api.mf_router import router as mf_router
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -127,6 +128,7 @@ app.include_router(ws_router)
 app.include_router(upstox_router)
 app.include_router(strategies_router)
 app.include_router(brokers_router)
+app.include_router(mf_router)
 
 
 @app.get("/")
