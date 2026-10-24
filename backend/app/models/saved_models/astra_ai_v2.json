@@ -1,0 +1,206 @@
+{
+  "version": "2.0.0",
+  "label": "tb15",
+  "label_column": "tb15_30_20_win",
+  "algo": "et",
+  "features": [
+    "Dist_SMA10",
+    "Dist_SMA30",
+    "Dist_SMA200",
+    "Dist_VWAP",
+    "RSI",
+    "RSI_Slope",
+    "MACD",
+    "MACD_Signal",
+    "MACD_Hist",
+    "ADX",
+    "Stoch_K",
+    "Stoch_D",
+    "BB_PctB",
+    "BB_Width",
+    "Daily_Ret",
+    "Volat_Ratio",
+    "Volume_Ratio",
+    "OBV_Slope",
+    "Candle_Body_Ratio",
+    "Lower_Shadow_Ratio",
+    "ret_5",
+    "ret_20",
+    "ret_60",
+    "ret_120",
+    "ret_250",
+    "dist_52w_high",
+    "dist_52w_low",
+    "vol_20",
+    "vol_60",
+    "atr_pct",
+    "ema20_50",
+    "ema50_200",
+    "vol_trend",
+    "rs_nifty_20",
+    "rs_nifty_60",
+    "rs_sector_60",
+    "mkt_above_200",
+    "mkt_ret_20",
+    "mkt_vol_20",
+    "rk_ret_20",
+    "rk_ret_60",
+    "rk_ret_120",
+    "rk_ret_250",
+    "rk_rs_nifty_60",
+    "rk_rs_sector_60",
+    "rk_dist_52w_high",
+    "rk_vol_20"
+  ],
+  "trained_until": "2026-09-17",
+  "exported_on": "2026-10-24",
+  "train_rows": 179720,
+  "q": 0.8,
+  "regime": true,
+  "max_pos": 15,
+  "stop_k": 2.0,
+  "tgt_k": 6.0,
+  "max_bars": 60,
+  "validation": {
+    "walk_forward_folds": [
+      {
+        "fold": "2019",
+        "ret": 2.7,
+        "sharpe": 0.3,
+        "dd": -11.7,
+        "trades": 129
+      },
+      {
+        "fold": "2020",
+        "ret": 28.8,
+        "sharpe": 2.04,
+        "dd": -9.1,
+        "trades": 106
+      },
+      {
+        "fold": "2021",
+        "ret": 39.1,
+        "sharpe": 1.53,
+        "dd": -11.9,
+        "trades": 131
+      },
+      {
+        "fold": "2022",
+        "ret": 6.7,
+        "sharpe": 0.43,
+        "dd": -12.2,
+        "trades": 117
+      },
+      {
+        "fold": "2023",
+        "ret": 95.2,
+        "sharpe": 3.11,
+        "dd": -9.5,
+        "trades": 171
+      }
+    ],
+    "mean_sharpe": 1.482
+  },
+  "test": {
+    "static_model": {
+      "cagr_pct": 2.4,
+      "total_return_pct": 5.7,
+      "max_dd_pct": -14.6,
+      "sharpe": 0.25,
+      "exposure_pct": 60.5,
+      "trades": 210,
+      "win_rate_pct": 34.3,
+      "avg_trade_pct": 0.53,
+      "yearly_pct": {
+        "2024": 2.4,
+        "2025": 11.6,
+        "2026": -7.6
+      }
+    },
+    "rolling_refit": {
+      "cagr_pct": -0.2,
+      "total_return_pct": -0.4,
+      "max_dd_pct": -13.6,
+      "sharpe": 0.05,
+      "exposure_pct": 60.6,
+      "trades": 241,
+      "win_rate_pct": 29.9,
+      "avg_trade_pct": 0.08,
+      "yearly_pct": {
+        "2024": 2.4,
+        "2025": 7.3,
+        "2026": -9.4
+      }
+    }
+  },
+  "benchmark_nifty": {
+    "valid": {
+      "cagr_pct": 17.8,
+      "total_return_pct": 24.2,
+      "max_dd_pct": -7.1,
+      "sharpe": 1.69,
+      "exposure_pct": 100.0,
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_trade_pct": 0.0,
+      "yearly_pct": {
+        "2023": 19.4,
+        "2024": 4.0
+      }
+    },
+    "test": {
+      "cagr_pct": -1.8,
+      "total_return_pct": -4.1,
+      "max_dd_pct": -15.8,
+      "sharpe": -0.08,
+      "exposure_pct": 100.0,
+      "trades": 0,
+      "win_rate_pct": 0.0,
+      "avg_trade_pct": 0.0,
+      "yearly_pct": {
+        "2024": -2.1,
+        "2025": 10.5,
+        "2026": -11.4
+      }
+    }
+  },
+  "benchmark_equal_weight": {
+    "valid": {
+      "total": 67.7,
+      "cagr": 47.7,
+      "maxdd": -7.1,
+      "yearly": {
+        "2023": 48.2,
+        "2024": 13.1
+      }
+    },
+    "test": {
+      "total": 3.6,
+      "cagr": 1.6,
+      "maxdd": -20.6,
+      "yearly": {
+        "2024": -0.6,
+        "2025": 9.6,
+        "2026": -4.9
+      }
+    },
+    "full": {
+      "total": 435.1,
+      "cagr": 19.6,
+      "maxdd": -38.7,
+      "yearly": {
+        "2017": 20.2,
+        "2018": 0.8,
+        "2019": 14.3,
+        "2020": 30.6,
+        "2021": 45.8,
+        "2022": 8.2,
+        "2023": 48.2,
+        "2024": 21.4,
+        "2025": 9.6,
+        "2026": -4.9
+      }
+    }
+  },
+  "notes": "Rules chosen by 5-fold walk-forward validation (2019\u20132024-04); test 2024-07\u2192 is out-of-sample. Production model refit on all data. Backtests use today's large-cap universe (survivorship bias) and daily bars; past results don't guarantee future returns."
+}

@@ -28,10 +28,19 @@ from app.services.tree_ensemble import export_forest, NumpyForestRegressor  # no
 
 def main():
     rep = json.loads((OUT / "research_trade.json").read_text())
-    sel = rep["selected"]
-    cand, g = sel["key"].split("|", 1)
-    g = json.loads(g)
-    lname, algo = cand.split("/")
+    wf_path = OUT / "walkforward_tb15_et.json"
+    if wf_path.exists():                       # prefer the multi-fold (walk-forward) selection
+        wf = json.loads(wf_path.read_text())
+        g = wf["selected"]["config"]
+        lname, algo = wf["label"], wf["algo"]
+        sel = {"valid": {"walk_forward_folds": wf["selected"]["folds"],
+                         "mean_sharpe": wf["selected"]["mean_sharpe"]},
+               "test": {"static_model": wf["test_static"], "rolling_refit": wf["test_rolling"]}}
+    else:
+        sel = rep["selected"]
+        cand, g = sel["key"].split("|", 1)
+        g = json.loads(g)
+        lname, algo = cand.split("/")
     col, _kind = LABELS[lname]
     ds = load_ds()
     feats = feature_columns()
@@ -52,8 +61,11 @@ def main():
         "stop_k": g["stop_k"], "tgt_k": g["tgt_k"], "max_bars": g["max_bars"],
         "validation": sel["valid"], "test": sel["test"],
         "benchmark_nifty": rep.get("nifty"),
-        "notes": "Validation 2023-01→2024-04 chose these rules; test 2024-07→ is out-of-sample "
-                 "(model refit on data to 2024-04 for the test). Production model refit on all data.",
+        "benchmark_equal_weight": json.loads((OUT / "benchmark_equal_weight.json").read_text())
+                                  if (OUT / "benchmark_equal_weight.json").exists() else None,
+        "notes": "Rules chosen by 5-fold walk-forward validation (2019–2024-04); test 2024-07→ is "
+                 "out-of-sample. Production model refit on all data. Backtests use today's large-cap "
+                 "universe (survivorship bias) and daily bars; past results don't guarantee future returns.",
     }
     (models_dir / "astra_ai_v2.json").write_text(json.dumps(cfg, indent=2, default=str))
     print(json.dumps({k: cfg[k] for k in ("label", "algo", "trained_until", "q", "regime", "stop_k", "tgt_k", "max_bars")}))
