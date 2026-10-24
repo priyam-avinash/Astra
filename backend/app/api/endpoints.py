@@ -1537,6 +1537,22 @@ def portfolio_summary(db: Session = Depends(get_db), current_user: User = Depend
         invested += p.entry_price * p.quantity
     value = capital + realised + unrealised
     day_pnl = today_realised + unrealised
+
+    # Paper mutual-fund holdings are a separate bucket (not funded from trading capital)
+    mf = {"invested": 0.0, "value": 0.0}
+    try:
+        from app.models.database import MFHolding
+        from app.services.mutual_funds import mf_service, MFError
+        for h in db.query(MFHolding).filter(MFHolding.user_id == current_user.id, MFHolding.units > 0).all():
+            mf["invested"] += h.invested or 0.0
+            try:
+                _, nav = mf_service.nav_history(h.scheme_code)
+                mf["value"] += h.units * float(nav.iloc[-1])
+            except MFError:
+                mf["value"] += h.invested or 0.0
+    except Exception as e:
+        logger.debug(f"MF summary skipped: {e}")
+    mf = {k: round(v, 2) for k, v in mf.items()}
     return {
         "starting_capital": capital,
         "portfolio_value": round(value, 2),
@@ -1546,6 +1562,7 @@ def portfolio_summary(db: Session = Depends(get_db), current_user: User = Depend
         "cash": round(capital + realised - invested, 2),
         "day_pnl": round(day_pnl, 2),
         "day_pnl_pct": round(day_pnl / (value - day_pnl) * 100, 2) if value - day_pnl else 0.0,
+        "mutual_funds": mf,
         "mode": "PAPER",
     }
 

@@ -250,6 +250,19 @@ class UniverseScanner:
         signals: list[dict] = []
 
         for engine_name in engines:
+            if engine_name == "astra_ai":
+                try:
+                    from app.services.ai_v2 import get_ai_v2
+                    v2 = get_ai_v2()
+                    if v2.available:
+                        for r in v2.scan(top_k=len(self.symbols)):
+                            if r["signal"] == "BUY" and r["confidence"] >= min_confidence:
+                                r["sector"] = self.get_sector(r["symbol"])
+                                r["weekly_trend"] = "NEUTRAL"
+                                signals.append(r)
+                        continue
+                except Exception as e:
+                    logger.warning(f"ASTRA.AI v2 scan failed ({e}); falling back to v1")
             logger.info(
                 f"UniverseScanner: starting {engine_name} scan "
                 f"({len(self.symbols)} symbols, {max_workers} workers)"

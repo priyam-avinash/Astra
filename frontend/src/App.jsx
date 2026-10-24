@@ -508,14 +508,14 @@ function Dashboard({ positions, queue, livePnL, onNavigate, onIndexClick, onQuic
           icon={<Briefcase size={16} />}
           title="Portfolio Value (paper)"
           value={summary ? `₹${fmtNum(summary.portfolio_value, 0)}` : '—'}
-          change={summary ? `${dayPct >= 0 ? '+' : ''}${dayPct}% today` : 'Loading…'}
+          change={summary ? `${dayPct >= 0 ? '+' : ''}${dayPct}% today${summary.mutual_funds?.value ? ` · MF ₹${fmtNum(summary.mutual_funds.value, 0)}` : ''}` : 'Loading…'}
           positive={dayPct >= 0}
           negative={dayPct < 0}
         />
         <MetricCard
           icon={livePnL >= 0 ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
           title="Live P&L"
-          value={`${livePnL >= 0 ? '+' : ''}₹${Math.abs(livePnL).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
+          value={`${livePnL >= 0 ? '+' : '−'}₹${Math.abs(livePnL).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
           change="Unrealized"
           positive={livePnL >= 0}
           negative={livePnL < 0}

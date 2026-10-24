@@ -621,6 +621,22 @@ class AIPredictionEngine:
                 engine, df, asset_symbol, macro_bull, weekly_trend, patterns)
             is_trending = float(last["ADX"]) >= 20
 
+            # ASTRA.AI v2 (walk-forward-validated ranking model) supersedes the v1
+            # Random Forest for stocks in its universe; others keep v1.
+            model_info = None
+            if engine == "astra_ai":
+                try:
+                    from app.services.ai_v2 import get_ai_v2
+                    v2 = get_ai_v2()
+                    if v2.available:
+                        model_info = v2.decide(asset_symbol)
+                        if model_info:
+                            signal, confidence = model_info["signal"], model_info["confidence"]
+                            mult_sl, mult_tp = model_info["sl_atr"], model_info["tp_atr"]
+                            model_info["model"] = "ASTRA.AI v2"
+                except Exception as e:
+                    logger.warning(f"ASTRA.AI v2 unavailable for {asset_symbol}: {e}")
+
             # ── ATR-Based SL/TP (all engines) ──
             entry_p = float(round(lp, 2))
             if signal == "SELL":
@@ -697,6 +713,7 @@ class AIPredictionEngine:
                 "market_regime": "TRENDING" if is_trending else "RANGING",
                 "macro_trend": "BULL" if macro_bull else "BEAR",
                 "weekly_trend": weekly_trend,
+                "model_info": model_info,
                 "candlestick_patterns": patterns,
                 "confirmations": confirmations,
                 "interval": interval,
