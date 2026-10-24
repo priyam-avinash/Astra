@@ -108,9 +108,9 @@ def _simulate_symbol(strategy: Strategy, symbol: str, df: pd.DataFrame,
         low   = float(row["Low"])
         close = float(row["Close"])
 
-        # Update peak (for trailing stop)
-        if high > position.peak_price:
-            position.peak_price = high
+        # Trailing level uses the peak from EARLIER bars only — within a daily bar we
+        # can't know whether today's high came before today's low (no look-ahead).
+        prior_peak = position.peak_price
 
         exit_reason: Optional[ExitReason] = None
         exit_price_raw: Optional[float] = None
@@ -126,13 +126,15 @@ def _simulate_symbol(strategy: Strategy, symbol: str, df: pd.DataFrame,
             exit_price_raw = position.target
 
         # 3. Trailing stop (intrabar, activated after some unrealised gain)
-        elif position.trail_pct is not None:
-            peak_gain = (position.peak_price - position.entry_price) / position.entry_price
+        # trail_pct of None or 0 means "no trailing stop" (0% would otherwise
+        # exit every trade at the bar's high — a fake, look-ahead profit).
+        elif position.trail_pct:
+            peak_gain = (prior_peak - position.entry_price) / position.entry_price
             if peak_gain >= position.trail_activate_pct:
-                trail_lvl = position.peak_price * (1 - position.trail_pct)
+                trail_lvl = prior_peak * (1 - position.trail_pct)
                 if low <= trail_lvl:
                     exit_reason = ExitReason.TRAIL_STOP
-                    exit_price_raw = trail_lvl
+                    exit_price_raw = min(trail_lvl, float(row["Open"]))
 
         # 4. Strategy-specific exit (e.g. Stage-2 SMA breakdown)
         if exit_reason is None:
@@ -140,6 +142,9 @@ def _simulate_symbol(strategy: Strategy, symbol: str, df: pd.DataFrame,
             if strat_exit is not None:
                 exit_reason = strat_exit
                 exit_price_raw = float(nxt["Open"])   # fill at next bar's open
+
+        if high > position.peak_price:
+            position.peak_price = high
 
         if exit_reason is None:
             continue
