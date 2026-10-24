@@ -40,7 +40,7 @@ async def strategies_backtest_summary():
 
 
 @router.get("/{name}")
-async def get_strategy_detail(name: str):
+def get_strategy_detail(name: str):     # eng.universe() may touch disk — keep off the loop
     """Return detailed metadata for one strategy."""
     from app.strategies.registry import get_strategy
     eng = get_strategy(name)
@@ -61,11 +61,13 @@ async def get_strategy_detail(name: str):
 
 
 @router.post("/{name}/backtest", dependencies=[Depends(get_current_user)])   # expensive: login required
-async def backtest_strategy(name: str):
+def backtest_strategy(name: str):
     """
     Run the full evaluator on `name`.
-    NOTE: this is a synchronous call — backtest takes 30-90 seconds.
-    Frontend should show a loading state. Future: queue via Celery for long runs.
+    NOTE: evaluate() is synchronous and takes 30-90 seconds, so this is a plain
+    `def` — FastAPI runs it in the threadpool instead of freezing the event
+    loop for every other request. Frontend should show a loading state.
+    Future: queue via Celery for long runs.
     """
     from app.strategies.registry import get_strategy
     from app.services.strategy_evaluator import evaluate

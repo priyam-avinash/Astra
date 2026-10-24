@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.api.endpoints import get_current_user
 from app.models.database import MFSip, User, get_db
-from app.services.mutual_funds import MFError, book_purchase, book_redemption, mf_service, portfolio
+from app.services.mutual_funds import (MFError, MAX_ACTIVE_SIPS, book_purchase, book_redemption, canon_code,
+                                       mf_service, portfolio)
 
 router = APIRouter(prefix="/api/mf", tags=["mutual-funds"])
 
@@ -85,7 +86,10 @@ def invest(req: InvestReq, db: Session = Depends(get_db), current_user: User = D
     try:
         tx = book_purchase(db, current_user.id, req.scheme_code, req.amount)
         db.commit()
-        return {"ok": True, "units": tx.units, "nav": tx.nav, "nav_date": tx.nav_date, "paper": True}
+        return {"ok": True, "status": tx.status, "units": tx.units, "nav": tx.nav, "nav_date": tx.nav_date,
+                "order_date": tx.order_date, "paper": True,
+                "message": ("Booked at NAV " + str(tx.nav)) if tx.status == "SETTLED"
+                           else "Order placed — it will be priced at the NAV declared for " + tx.order_date}
     except MFError as e:
         db.rollback()
         _err(e)
@@ -96,8 +100,8 @@ def redeem(req: RedeemReq, db: Session = Depends(get_db), current_user: User = D
     try:
         tx = book_redemption(db, current_user.id, req.scheme_code, units=req.units, amount=req.amount)
         db.commit()
-        return {"ok": True, "units": tx.units, "nav": tx.nav, "proceeds": tx.amount,
-                "realised_pnl": tx.realised_pnl, "paper": True}
+        return {"ok": True, "status": tx.status, "units": tx.units, "nav": tx.nav, "proceeds": tx.amount,
+                "realised_pnl": tx.realised_pnl, "order_date": tx.order_date, "paper": True}
     except MFError as e:
         db.rollback()
         _err(e)
@@ -106,9 +110,13 @@ def redeem(req: RedeemReq, db: Session = Depends(get_db), current_user: User = D
 @router.post("/sip")
 def create_sip(req: SipReq, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     try:
-        meta, _ = mf_service.nav_history(req.scheme_code)
+        code = canon_code(req.scheme_code)
+        meta, _ = mf_service.nav_history(code)
     except MFError as e:
         _err(e)
+    active = db.query(MFSip).filter(MFSip.user_id == current_user.id, MFSip.active == True).count()  # noqa: E712
+    if active >= MAX_ACTIVE_SIPS:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_ACTIVE_SIPS} active SIPs")
     start = req.start_date or date.today().isoformat()
     try:
         sd = date.fromisoformat(start)
@@ -116,7 +124,7 @@ def create_sip(req: SipReq, db: Session = Depends(get_db), current_user: User = 
         raise HTTPException(status_code=400, detail="start_date must be YYYY-MM-DD")
     if sd > date.today() or (date.today() - sd).days > 366 * 10:
         raise HTTPException(status_code=400, detail="start_date must be within the last 10 years and not in the future")
-    sip = MFSip(user_id=current_user.id, scheme_code=req.scheme_code, scheme_name=meta.get("scheme_name"),
+    sip = MFSip(user_id=current_user.id, scheme_code=code, scheme_name=meta.get("scheme_name"),
                 amount=req.amount, day_of_month=req.day_of_month, start_date=start, active=True)
     db.add(sip)
     db.commit()

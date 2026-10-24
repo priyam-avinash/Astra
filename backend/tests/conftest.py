@@ -46,6 +46,7 @@ def jwt_client(monkeypatch):
     """TestClient with AUTH_MODE=jwt forced. Reloads endpoints module to re-evaluate guard."""
     monkeypatch.setenv("AUTH_MODE", "jwt")
     monkeypatch.setenv("PAPER_TRADING", "true")
+    monkeypatch.setenv("ASTRA_OPEN_REGISTRATION", "true")   # tests register many users
     import importlib
     import app.api.endpoints as ep_mod
     importlib.reload(ep_mod)
@@ -67,3 +68,17 @@ def bypass_client(monkeypatch):
     importlib.reload(main_mod)
     from fastapi.testclient import TestClient
     return TestClient(main_mod.app)
+
+
+@pytest.fixture(autouse=True)
+def _nse_open_for_tests(monkeypatch, request):
+    """Tests run at any hour: pretend NSE is open unless a test opts out with
+    @pytest.mark.market_closed."""
+    if request.node.get_closest_marker("market_closed"):
+        monkeypatch.setattr("app.services.trading_utils.nse_open", lambda *a, **k: False)
+    else:
+        monkeypatch.setattr("app.services.trading_utils.nse_open", lambda *a, **k: True)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "market_closed: run with NSE market hours closed")

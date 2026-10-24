@@ -56,10 +56,25 @@ DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 #  Errors & provider health
 # ════════════════════════════════════════════════════════════════════════════
 
+# Provider exception text often embeds the full request URL, including
+# credentials passed as query params (...?apikey=SECRET). Scrub before the text
+# is stored (ProviderHealth.last_error, /api/data/health, probe) or logged.
+_SECRET_PARAM_RE = re.compile(
+    r"(?i)\b(apikey|api_key|access_token|token|key)=([^&\s'\"<>]+)")
+
+
+def scrub_secrets(text) -> str:
+    """Replace values of apikey/api_key/token/access_token/key params with ***."""
+    if text is None:
+        return ""
+    return _SECRET_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", str(text))
+
+
 class ProviderError(Exception):
     """kind: 'auth' | 'quota' | 'rate_limit' | 'unsupported' | 'no_data' | 'network'"""
 
     def __init__(self, kind: str, message: str):
+        message = scrub_secrets(message)
         super().__init__(message)
         self.kind = kind
         self.message = message
@@ -119,7 +134,7 @@ class ProviderHealth:
         with self._lock:
             st = self._get(name)
             st.failed += 1
-            st.last_error = err.message[:300]
+            st.last_error = scrub_secrets(err.message)[:300]
             st.last_error_kind = err.kind
             st.last_error_at = datetime.now()
             if err.kind in ("no_data",):
@@ -208,7 +223,7 @@ def _http_get(url: str, *, params: Optional[dict] = None, kind: str = "browser",
         return _session(kind).get(url, params=params, headers=headers, timeout=timeout)
     except Exception as e:  # DNS, TLS, timeout, connection refused …
         _reset_session(kind)
-        raise ProviderError("network", f"{type(e).__name__}: {str(e)[:160]}")
+        raise ProviderError("network", f"{type(e).__name__}: {scrub_secrets(e)[:160]}")
 
 
 def _json(resp, provider: str) -> dict:
@@ -442,7 +457,7 @@ def _twelve_data_ohlcv(symbol: str, days: int, interval: str) -> pd.DataFrame:
     if not key:
         raise ProviderError("unsupported", "no Twelve Data key configured")
     ac = asset_class(symbol)
-    params = {"apikey": key, "format": "JSON", "order": "ASC"}
+    params = {"format": "JSON", "order": "ASC"}    # key goes in the Authorization header, never the URL
     if ac == "india_equity":
         params["symbol"] = bare_symbol(symbol)
         params["exchange"] = "BSE" if symbol.endswith(".BO") else "NSE"
@@ -459,7 +474,8 @@ def _twelve_data_ohlcv(symbol: str, days: int, interval: str) -> pd.DataFrame:
     per_day = {"1m": 375, "5m": 75, "15m": 25, "30m": 13, "1h": 7, "4h": 2, "1d": 1, "1wk": 0.2}[interval]
     params["interval"] = ti
     params["outputsize"] = int(min(5000, max(30, days * per_day)))
-    resp = _http_get("https://api.twelvedata.com/time_series", params=params, kind="plain")
+    resp = _http_get("https://api.twelvedata.com/time_series", params=params, kind="plain",
+                     headers={"Authorization": f"apikey {key}"})
     data = _json(resp, "Twelve Data")
     if data.get("status") == "error" or "values" not in data:
         code = data.get("code")
@@ -708,7 +724,13 @@ def _is_configured(provider: str) -> bool:
 #  Caches
 # ════════════════════════════════════════════════════════════════════════════
 
+# Only these intervals may ever reach a filesystem path (disk cache / offline CSVs).
+ALLOWED_INTERVALS = frozenset({"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1wk", "1mo"})
+
+
 def _disk_path(symbol: str, interval: str) -> Path:
+    if interval not in ALLOWED_INTERVALS:
+        raise ValueError(f"unsupported interval: {interval!r}")
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", symbol.replace("^", "IDX_").replace("=", "_F"))
     return DISK_CACHE_DIR / f"{safe}__{interval}.csv"
 
@@ -723,7 +745,10 @@ def _disk_put(symbol: str, interval: str, df: pd.DataFrame, source: str):
 
 
 def _disk_get(symbol: str, interval: str) -> tuple[pd.DataFrame, Optional[str], Optional[datetime]]:
-    path = _disk_path(symbol, interval)
+    try:
+        path = _disk_path(symbol, interval)
+    except ValueError:
+        return pd.DataFrame(), None, None
     if not path.exists():
         return pd.DataFrame(), None, None
     try:
@@ -810,7 +835,7 @@ class MarketDataService:
         sym = normalize_symbol(symbol)
         itv = norm_interval(interval)
         days = period_days(period)
-        if not sym:
+        if not sym or itv not in ALLOWED_INTERVALS:
             return pd.DataFrame(columns=OHLCV)
         if os.getenv("ASTRA_OFFLINE_DATA_DIR"):
             return self._offline_ohlcv(sym, itv, days)
@@ -902,7 +927,7 @@ class MarketDataService:
                 errors.append(f"{name}: {e.message}")
                 continue
             except Exception as e:  # provider bug — never let it break the chain
-                err = ProviderError("network", f"{type(e).__name__}: {str(e)[:150]}")
+                err = ProviderError("network", f"{type(e).__name__}: {scrub_secrets(e)[:150]}")
                 HEALTH.record_fail(name, err, ac)
                 errors.append(f"{name}: {err.message}")
                 continue
@@ -961,12 +986,21 @@ class MarketDataService:
                         break
                 except Exception:
                     continue
-        # 4. Yahoo chart meta (works for every asset class)
+        stale = False
+        # 4. Yahoo chart meta (works for every asset class). A price whose last
+        #    trade is >15 min old (market closed / holiday / weekend) or that is
+        #    only the previous close is returned but flagged stale, so paper
+        #    orders and exits never fill at it.
         if not price and HEALTH.available("yahoo", ac):
             try:
                 data = _yahoo_chart(sym, {"range": "1d", "interval": "1m", "includePrePost": "false"})
                 meta = data["chart"]["result"][0]["meta"]
-                p = meta.get("regularMarketPrice") or meta.get("previousClose")
+                p = meta.get("regularMarketPrice")
+                if p:
+                    t = meta.get("regularMarketTime") or 0
+                    stale = (time.time() - float(t)) > 900 if ac != "crypto" else (time.time() - float(t)) > 600
+                elif meta.get("previousClose"):
+                    p, stale = meta.get("previousClose"), True
                 if p:
                     price, source = float(p), "yahoo"
                     HEALTH.record_ok("yahoo")
@@ -974,17 +1008,17 @@ class MarketDataService:
                 HEALTH.record_fail("yahoo", e, ac)
             except Exception:
                 pass
-        # 5. Last close from OHLCV (any provider, possibly stale)
-        stale = False
+        # 5. Last daily close from OHLCV — never a live price
         if not price:
             df = self.get_ohlcv(sym, period="5d", interval="1d")
             if not df.empty:
                 price = float(df["Close"].iloc[-1])
-                stale = bool(df.attrs.get("stale"))
+                stale = True
                 source = f"last_close:{df.attrs.get('source')}"
 
         if price and math.isfinite(price) and price > 0:
-            price = round(price, 2)
+            from app.services.trading_utils import px
+            price = px(price)
             if not stale:
                 self._price[sym] = (price, datetime.now(), source)
             return {"price": price, "source": source, "stale": stale,
@@ -995,7 +1029,8 @@ class MarketDataService:
         return self.get_quote_info(symbol)["price"]
 
     def put_live_price(self, symbol: str, price: float, source: str = "dhan_ws"):
-        self._price[normalize_symbol(symbol)] = (round(float(price), 2), datetime.now(), source)
+        from app.services.trading_utils import px
+        self._price[normalize_symbol(symbol)] = (px(price), datetime.now(), source)
 
     # ── News (Yahoo search — free, no key) ─────────────────────────────────
     def get_news(self, symbol: str, limit: int = 12) -> list[dict]:
@@ -1087,7 +1122,7 @@ class MarketDataService:
                     results[f"{name}:{sym}"] = {"ok": False, "kind": e.kind, "detail": e.message,
                                                 "secs": round(time.monotonic() - t0, 2)}
                 except Exception as e:
-                    results[f"{name}:{sym}"] = {"ok": False, "kind": "bug", "detail": f"{type(e).__name__}: {e}"}
+                    results[f"{name}:{sym}"] = {"ok": False, "kind": "bug", "detail": f"{type(e).__name__}: {scrub_secrets(e)}"}
         return results
 
     def clear_cache(self, symbol: Optional[str] = None):

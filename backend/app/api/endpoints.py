@@ -11,6 +11,7 @@ from app.services.auth import verify_password, get_password_hash, create_access_
 from jose import JWTError, jwt
 import os
 import logging
+import uuid
 import numpy as np
 from datetime import datetime, date
 
@@ -96,7 +97,8 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
         )
 
     try:
-        payload  = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        from app.services.auth import decode_access_token
+        payload  = decode_access_token(token)   # rejects OAuth-state tokens and typ != "access"
         username = payload.get("sub")
         if not username:
             raise JWTError("Token has no 'sub' claim")
@@ -117,30 +119,128 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme),
     set_current_user_id(user.id)
     return user
 
-# ── Kill Switch endpoints (defined AFTER get_current_user) ───────────────────
+# ── Ownership / kill switch (persisted, works on serverless) ─────────────────
+def _is_admin(user: User, db: Session) -> bool:
+    """The owner account (first real user) — or anyone in local bypass mode."""
+    if _AUTH_MODE == "bypass":
+        return True
+    first = db.query(User).filter(User.username != "admin_bypass").order_by(User.id.asc()).first()
+    return bool(first and first.id == user.id)
+
+
+def _require_admin(user: User, db: Session):
+    if not _is_admin(user, db):
+        raise HTTPException(status_code=403, detail="Only the account owner can change this.")
+
+
+def _halted(db: Session) -> bool:
+    row = db.query(AppSettings).filter(AppSettings.key == "trading_halted").first()
+    return bool(row and str(row.value).lower() == "true")
+
+
+def _set_halted(db: Session, value: bool):
+    row = db.query(AppSettings).filter(AppSettings.key == "trading_halted").first()
+    if row:
+        row.value = "true" if value else "false"
+        row.updated_at = datetime.utcnow()
+    else:
+        db.add(AppSettings(key="trading_halted", value="true" if value else "false"))
+    db.commit()
+
+
 @router.get("/api/emergency/status")
-def trading_status(current_user: User = Depends(get_current_user)):
+def trading_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return {
-        "halted":         _TRADING_HALTED,
+        "halted":         _halted(db),
         "mode":           "PAPER" if PAPER_MODE else "LIVE",
         "paper_trading":  PAPER_MODE,
         "max_positions":  MAX_POSITIONS,
         "max_daily_loss": MAX_DAILY_LOSS,
+        "can_change":     _is_admin(current_user, db),
     }
 
 @router.post("/api/emergency/halt")
-def halt_trading(current_user: User = Depends(get_current_user)):
-    global _TRADING_HALTED
-    _TRADING_HALTED = True
+def halt_trading(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_admin(current_user, db)
+    _set_halted(db, True)
     logger.warning(f"⛔ TRADING HALTED by {current_user.username}")
     return {"halted": True, "message": "All trading halted. No new orders will be placed."}
 
 @router.post("/api/emergency/resume")
-def resume_trading(current_user: User = Depends(get_current_user)):
-    global _TRADING_HALTED
-    _TRADING_HALTED = False
+def resume_trading(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    _require_admin(current_user, db)
+    _set_halted(db, False)
     logger.info(f"▶ Trading resumed by {current_user.username}")
     return {"halted": False, "message": "Trading resumed."}
+
+
+# ── Shared trading helpers (v1.14.1) ──────────────────────────────────────────
+def _risk_guard(db: Session, user: User):
+    """Kill switch, max concurrent positions and the daily loss limit (IST day, INR,
+    realised losses plus open-position drawdown). Raises HTTPException."""
+    from app.services.trading_utils import ist_day_start_utc, currency_of, to_inr
+    if _halted(db):
+        raise HTTPException(status_code=503, detail="⛔ Trading is halted (kill switch). The account owner can resume it.")
+    open_pos = db.query(ActivePosition).filter(ActivePosition.user_id == user.id,
+                                               ActivePosition.status == "OPEN").all()
+    if len(open_pos) >= MAX_POSITIONS:
+        raise HTTPException(status_code=429, detail=f"Max {MAX_POSITIONS} concurrent positions reached. Close a position first.")
+    day_start = ist_day_start_utc()
+    realised = 0.0
+    for r in db.query(TradeRecord).filter(TradeRecord.user_id == user.id, TradeRecord.timestamp >= day_start,
+                                          TradeRecord.pnl < 0).all():
+        realised += to_inr(r.pnl or 0.0, currency_of(r.asset))
+    unrealised = 0.0
+    try:
+        from app.services.market_data import market_data
+        for p in open_pos:
+            q = market_data.get_quote_info(p.asset)
+            if q["price"] > 0:
+                sign = 1 if (p.direction or "BUY").upper() == "BUY" else -1
+                pnl = sign * (q["price"] - p.entry_price) * p.quantity
+                if pnl < 0:
+                    unrealised += to_inr(pnl, currency_of(p.asset))
+    except Exception:
+        pass
+    if realised + unrealised <= -MAX_DAILY_LOSS:
+        raise HTTPException(status_code=429, detail=f"Daily loss limit (₹{MAX_DAILY_LOSS:,.0f}) reached. Trading paused for today.")
+
+
+def _validate_order(action: str, quantity, price) -> str:
+    a = (action or "").upper().strip()
+    if a not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="Action must be BUY or SELL.")
+    if quantity is None or quantity < 1 or quantity > 1_000_000:
+        raise HTTPException(status_code=400, detail="Quantity must be between 1 and 1,000,000.")
+    if price is None or not (price > 0) or price != price or price == float("inf"):
+        raise HTTPException(status_code=400, detail="Price must be a positive number.")
+    return a
+
+
+def _anchor_levels(action: str, ref_price: float, fill: float, sl, tp):
+    """Keep the stop/target DISTANCES the signal intended but measure them from the
+    actual fill (signals can be hours old). Levels on the wrong side are dropped."""
+    from app.services.trading_utils import px
+    if not ref_price or ref_price <= 0:
+        ref_price = fill
+    out = []
+    for lvl, kind in ((sl, "sl"), (tp, "tp")):
+        if not lvl or lvl <= 0:
+            out.append(None)
+            continue
+        dist = abs(ref_price - lvl)
+        if action == "BUY":
+            v = fill - dist if kind == "sl" else fill + dist
+        else:
+            v = fill + dist if kind == "sl" else fill - dist
+        out.append(px(v) if v > 0 else None)
+    return out[0], out[1]
+
+
+from app.services.positions import (  # noqa: E402  shared with the background monitor
+    claim_position as _claim_position, release_position as _release_position, book_close as _book_close,
+)
+
 
 class UserCreate(BaseModel):
     username: str
@@ -161,9 +261,13 @@ def _registration_open(db: Session) -> bool:
     ASTRA_OPEN_REGISTRATION=false.
     """
     from app.core.config import env_flag, SERVERLESS
+    from app.models.database import IS_SQLITE
     if _allowed_users():
         return True
-    if env_flag("ASTRA_OPEN_REGISTRATION", not SERVERLESS):
+    if SERVERLESS and IS_SQLITE:
+        # Per-instance /tmp database: "first user only" would reopen on every cold start.
+        return False
+    if env_flag("ASTRA_OPEN_REGISTRATION", not SERVERLESS and _AUTH_MODE == "bypass"):
         return True
     real_users = db.query(User).filter(User.username != "admin_bypass").count()
     return real_users == 0
@@ -245,6 +349,7 @@ def get_ai_signals(db: Session = Depends(get_db), current_user: User = Depends(g
             "stopLoss":    s.stop_loss,
             "confidence":  s.confidence,
             "engine":      s.engine or "astra",
+            "currency":    _cur(s.asset),
             "age":         "Just now"
         } for s in signals
     ]}
@@ -565,60 +670,38 @@ def push_ai_signal(signal: SignalPayload, db: Session = Depends(get_db), current
 
 @router.post("/api/execute")
 def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # ── Server-side risk guards ───────────────────────────────────────────────
-    if _TRADING_HALTED:
-        raise HTTPException(status_code=503, detail="⛔ Trading is halted. Use /api/emergency/resume to re-enable.")
-
-    open_count = db.query(ActivePosition).filter(
-        ActivePosition.user_id == current_user.id,
-        ActivePosition.status == "OPEN"
-    ).count()
-    if open_count >= MAX_POSITIONS:
-        raise HTTPException(status_code=429, detail=f"Max {MAX_POSITIONS} concurrent positions reached. Close a position first.")
-
-    today_loss = db.query(func.sum(TradeRecord.pnl)).filter(
-        TradeRecord.user_id == current_user.id,
-        func.date(TradeRecord.timestamp) == date.today(),
-        TradeRecord.pnl < 0,
-    ).scalar() or 0.0
-    if today_loss < -MAX_DAILY_LOSS:
-        raise HTTPException(status_code=429, detail=f"Daily loss limit (₹{MAX_DAILY_LOSS:,.0f}) reached. Trading paused for today.")
-
-    if trade.quantity < 1:
-        raise HTTPException(status_code=400, detail="Quantity must be at least 1.")
-    # ─────────────────────────────────────────────────────────────────────────
+    """Approve a queued signal → paper position. A signal can be executed once."""
+    from datetime import timedelta
+    action = _validate_order(trade.action, trade.quantity, trade.price)
+    _risk_guard(db, current_user)
 
     signal = db.query(TargetSignal).filter(TargetSignal.id == trade.id, TargetSignal.user_id == current_user.id).first()
-    if signal:
-        signal.status = "Executed"
+    if signal is None:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+    ttl_h = float(os.getenv("SIGNAL_TTL_HOURS", "24"))
+    if signal.created_at and signal.created_at < datetime.utcnow() - timedelta(hours=ttl_h):
+        raise HTTPException(status_code=409, detail="This signal has expired — re-run the analysis.")
+    if (signal.signal or "").upper() in ("BUY", "SELL") and (signal.signal or "").upper() != action:
+        raise HTTPException(status_code=400, detail=f"Signal is {signal.signal}, not {action}.")
+    claimed = db.query(TargetSignal).filter(TargetSignal.id == signal.id, TargetSignal.status == "Pending Approval") \
+                .update({TargetSignal.status: "Executing"}, synchronize_session=False)
+    db.commit()
+    if not claimed:
+        raise HTTPException(status_code=409, detail="This signal was already executed or has expired.")
 
     try:
-        result = broker_service.execute_trade(
-            asset=trade.asset,
-            action=trade.action,
-            quantity=trade.quantity,
-            price=trade.price
-        )
-        
-        fill_price = float(result.get("executed_price") or trade.price)
+        result = broker_service.execute_trade(asset=trade.asset, action=action,
+                                              quantity=trade.quantity, price=trade.price)
+        fill_price = float(result["executed_price"])
+        sl, tp = _anchor_levels(action, trade.price, fill_price, trade.stop_loss, trade.target_price)
 
-        # 1. Create permanent trade record (at the actual paper fill, not the signal price)
-        new_trade = TradeRecord(
-            user_id=current_user.id,
-            trade_id=result["order_id"],
-            asset=trade.asset,
-            action=trade.action,
-            price=fill_price,
-            quantity=trade.quantity,
-            pnl=0.0,
-            status="Executed (AI Signal · Paper)"
-        )
-        db.add(new_trade)
+        db.add(TradeRecord(
+            user_id=current_user.id, trade_id=result["order_id"], asset=trade.asset, action=action,
+            price=fill_price, quantity=trade.quantity, pnl=0.0, status="Executed (AI Signal · Paper)"))
 
-        # 2. Create interactive active position for P&L tracking
-        # Snapshot the 20-indicator feature vector at this exact moment for self-learning
+        # Snapshot the 20-indicator feature vector for self-learning
         features_json = None
-        engine_used   = getattr(trade, "engine", "unknown") or "unknown"
+        engine_used = getattr(signal, "engine", None) or getattr(trade, "engine", "unknown") or "unknown"
         try:
             from app.services.ai_predictor import ai_engine, FEATURE_COLS
             import json as _json
@@ -631,28 +714,26 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
         except Exception as _fe:
             logger.debug(f"Feature snapshot failed for {trade.asset}: {_fe}")
 
-        new_pos = ActivePosition(
-            user_id=current_user.id,
-            asset=trade.asset,
-            direction=trade.action.upper(),
-            entry_price=fill_price,
-            quantity=trade.quantity,
-            target_price=trade.target_price,
-            stop_loss=trade.stop_loss,
-            status="OPEN",
-            entry_features_json=features_json,
-            engine=engine_used,
-        )
-        db.add(new_pos)
-
+        db.add(ActivePosition(
+            user_id=current_user.id, asset=trade.asset, direction=action, entry_price=fill_price,
+            quantity=trade.quantity, target_price=tp, stop_loss=sl, status="OPEN",
+            entry_features_json=features_json, engine=engine_used))
+        db.query(TargetSignal).filter(TargetSignal.id == signal.id).update(
+            {TargetSignal.status: "Executed"}, synchronize_session=False)
         db.commit()
-        return result
+        return {**result, "stop_loss": sl, "target_price": tp}
     except ValueError as e:
         db.rollback()
+        db.query(TargetSignal).filter(TargetSignal.id == signal.id, TargetSignal.status == "Executing") \
+          .update({TargetSignal.status: "Pending Approval"}, synchronize_session=False)
+        db.commit()
         raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("execute failed")
+        raise HTTPException(status_code=500, detail="Order failed — see server logs.")
 
 class ManualTradeAction(BaseModel):
     asset: str
@@ -664,184 +745,104 @@ class ManualTradeAction(BaseModel):
 
 @router.post("/api/execute/manual")
 def execute_manual_trade(trade: ManualTradeAction, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if _TRADING_HALTED:
-        raise HTTPException(status_code=503, detail="⛔ Trading is halted. Use /api/emergency/resume to re-enable.")
-    if trade.quantity < 1:
-        raise HTTPException(status_code=400, detail="Quantity must be at least 1.")
-    if trade.action.upper() not in ("BUY", "SELL"):
-        raise HTTPException(status_code=400, detail="Action must be BUY or SELL.")
-    open_count = db.query(ActivePosition).filter(
-        ActivePosition.user_id == current_user.id, ActivePosition.status == "OPEN").count()
-    if open_count >= MAX_POSITIONS:
-        raise HTTPException(status_code=429, detail=f"Max {MAX_POSITIONS} concurrent positions reached.")
+    action = _validate_order(trade.action, trade.quantity, trade.price)
+    _risk_guard(db, current_user)
     try:
-        result = broker_service.execute_trade(
-            asset=trade.asset,
-            action=trade.action,
-            quantity=trade.quantity,
-            price=trade.price
-        )
-        
-        fill_price = float(result.get("executed_price") or trade.price)
-        new_trade = TradeRecord(
-            user_id=current_user.id,
-            trade_id=result["order_id"],
-            asset=trade.asset,
-            action=trade.action,
-            price=fill_price,
-            quantity=trade.quantity,
-            pnl=0.0,
-            status="Executed (Manual · Paper)"
-        )
-        db.add(new_trade)
-
-        new_pos = ActivePosition(
-            user_id=current_user.id,
-            asset=trade.asset,
-            direction=trade.action.upper(),
-            entry_price=fill_price,
-            quantity=trade.quantity,
-            target_price=trade.target_price,
-            stop_loss=trade.stop_loss,
-            status="OPEN"
-        )
-        db.add(new_pos)
-
+        result = broker_service.execute_trade(asset=trade.asset, action=action,
+                                              quantity=trade.quantity, price=trade.price)
+        fill_price = float(result["executed_price"])
+        sl, tp = _anchor_levels(action, trade.price, fill_price, trade.stop_loss, trade.target_price)
+        db.add(TradeRecord(
+            user_id=current_user.id, trade_id=result["order_id"], asset=trade.asset, action=action,
+            price=fill_price, quantity=trade.quantity, pnl=0.0, status="Executed (Manual · Paper)"))
+        db.add(ActivePosition(
+            user_id=current_user.id, asset=trade.asset, direction=action, entry_price=fill_price,
+            quantity=trade.quantity, target_price=tp, stop_loss=sl, status="OPEN"))
         db.commit()
-        return result
+        return {**result, "stop_loss": sl, "target_price": tp}
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
+    except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("manual execute failed")
+        raise HTTPException(status_code=500, detail="Order failed — see server logs.")
 
 @router.get("/api/positions")
 def get_active_positions(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Open positions with live P&L. On serverless (no background monitor) this
+    also runs the SL/TP/trailing check — through the same atomic close path."""
+    from app.services.market_data import market_data
+    from app.services.trading_utils import currency_of
+    from app.services.tasks import check_and_close_position
     positions = db.query(ActivePosition).filter(
-        ActivePosition.user_id == current_user.id,
-        ActivePosition.status == "OPEN"
-    ).all()
-    
+        ActivePosition.user_id == current_user.id, ActivePosition.status == "OPEN").all()
     resp = []
     for p in positions:
-        # Live price (stale/cached prices are shown but never trigger exits)
-        from app.services.market_data import market_data
         q = market_data.get_quote_info(p.asset)
         current_price, price_stale = q["price"], q["stale"]
         if current_price <= 0:
             current_price, price_stale = p.entry_price, True
-
-        # AUTO-EXIT CHECK
-        triggered = False
-        exit_reason = ""
-        if p.direction == "BUY":
-            if p.target_price and current_price >= p.target_price:
-                triggered = True; exit_reason = "Target Hit"
-            elif p.stop_loss and current_price <= p.stop_loss:
-                triggered = True; exit_reason = "Stop Loss Hit"
-        else: # SELL
-            if p.target_price and current_price <= p.target_price:
-                triggered = True; exit_reason = "Target Hit"
-            elif p.stop_loss and current_price >= p.stop_loss:
-                triggered = True; exit_reason = "Stop Loss Hit"
-
-        if triggered and not price_stale:
-            # Auto-square off
-            p.status = "CLOSED"
-            p.exit_price = current_price
-            p.exit_time = datetime.utcnow()
-            
-            # Record exit in history
-            exit_action = "SELL" if p.direction == "BUY" else "BUY"
-            pnl = (current_price - p.entry_price) * p.quantity if p.direction == "BUY" else (p.entry_price - current_price) * p.quantity
-            
-            new_history = TradeRecord(
-                user_id=current_user.id,
-                trade_id=f"AUTO-{p.id}",
-                asset=p.asset,
-                action=f"{exit_action} ({exit_reason})",
-                price=current_price,
-                quantity=p.quantity,
-                pnl=round(pnl, 2),
-                status="Closed (Auto)"
-            )
-            db.add(new_history)
-            db.commit()
-            continue # Don't add to active resp
-
-        unrealized_pnl = (current_price - p.entry_price) * p.quantity if p.direction == "BUY" else (p.entry_price - current_price) * p.quantity
-        
+        if not price_stale:
+            closed = check_and_close_position(db, p, current_price)
+            if closed:
+                continue
+        unrealized_pnl = (current_price - p.entry_price) * p.quantity if p.direction == "BUY" \
+            else (p.entry_price - current_price) * p.quantity
         resp.append({
-            "id": p.id,
-            "asset": p.asset,
-            "direction": p.direction,
-            "entry_price": p.entry_price,
-            "quantity": p.quantity,
-            "target_price": p.target_price,
-            "stop_loss": p.stop_loss,
-            "current_price": round(current_price, 2),
+            "id": p.id, "asset": p.asset, "direction": p.direction, "currency": currency_of(p.asset),
+            "entry_price": p.entry_price, "quantity": p.quantity,
+            "target_price": p.target_price, "stop_loss": p.stop_loss,
+            "current_price": current_price,
             "pnl": round(unrealized_pnl, 2),
             "pnl_pct": round((unrealized_pnl / (p.entry_price * p.quantity)) * 100, 2) if p.entry_price and p.quantity else 0,
-            "time": p.entry_time.strftime("%H:%M:%S"),
-            "status": p.status,
-            "price_source": q.get("source"),
-            "price_stale": price_stale,
+            "time": (p.entry_time.isoformat(timespec="seconds") + "Z") if p.entry_time else None,
+            "status": p.status, "price_source": q.get("source"), "price_stale": price_stale,
         })
     return {"positions": resp}
 
 @router.post("/api/positions/squareoff/{position_id}")
 def square_off_position(position_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    pos = db.query(ActivePosition).filter(ActivePosition.id == position_id, ActivePosition.user_id == current_user.id).first()
+    pos = db.query(ActivePosition).filter(ActivePosition.id == position_id,
+                                          ActivePosition.user_id == current_user.id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
-    
-    # Execute opposite trade
+    if not _claim_position(db, pos.id):
+        raise HTTPException(status_code=409, detail="Position is already closed.")
+    db.refresh(pos)
     exit_action = "SELL" if pos.direction == "BUY" else "BUY"
-    
     try:
-        # Use real LTP from the paper trading engine (not random)
-        exit_price = broker_service.get_exit_price(pos.asset, pos.direction)
-        if not exit_price or exit_price <= 0:
-            # Fallback: use last known current_price from AI engine
-            exit_price = ai_engine.get_realtime_price(pos.asset) or pos.entry_price
-
-        result = broker_service.execute_trade(
-            asset=pos.asset,
-            action=exit_action,
-            quantity=pos.quantity,
-            price=exit_price
-        )
-        exit_price = result.get("executed_price", exit_price)
-
-        pnl = (exit_price - pos.entry_price) * pos.quantity if pos.direction == "BUY" else (pos.entry_price - exit_price) * pos.quantity
-        
-        # Update position
-        pos.status = "CLOSED"
-        pos.exit_price = exit_price
-        pos.exit_time = datetime.utcnow()
-        
-        # Add to history
-        new_history = TradeRecord(
-            user_id=current_user.id,
-            trade_id=result["order_id"],
-            asset=pos.asset,
-            action=exit_action + " (Square Off)",
-            price=exit_price,
-            quantity=pos.quantity,
-            pnl=pnl,
-            status="Closed"
-        )
-        db.add(new_history)
-        db.commit()
-        
+        result = broker_service.execute_trade(asset=pos.asset, action=exit_action,
+                                              quantity=pos.quantity, price=pos.entry_price)
+        exit_price = float(result["executed_price"])
+        pnl, _ = _book_close(db, pos, exit_price, "Square Off", "Closed", order=result)
         return {"status": "success", "pnl": pnl, "exit_price": exit_price}
     except ValueError as e:
         db.rollback()
+        _release_position(db, pos.id)
         raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
+    except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        _release_position(db, pos.id)
+        logger.exception("square-off failed")
+        raise HTTPException(status_code=500, detail="Square-off failed — see server logs.")
+
+def _ist(ts) -> str:
+    """Naive-UTC DB timestamp → 'YYYY-MM-DD HH:MM' IST."""
+    from datetime import timezone
+    from app.services.trading_utils import IST
+    if not hasattr(ts, "strftime"):
+        return "Unknown"
+    return ts.replace(tzinfo=timezone.utc).astimezone(IST).strftime("%Y-%m-%d %H:%M")
+
+
+def _cur(symbol: str) -> str:
+    from app.services.trading_utils import currency_of
+    try:
+        return currency_of(symbol)
+    except Exception:
+        return "INR"
+
 
 @router.get("/api/history")
 def get_trade_history(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -850,12 +851,13 @@ def get_trade_history(db: Session = Depends(get_db), current_user: User = Depend
         {
             "id": h.trade_id,
             "asset": h.asset,
+            "currency": _cur(h.asset),
             "action": h.action,
             "price": h.price,
             "qty": h.quantity,
             "pnl": h.pnl,
             "status": h.status,
-            "time": h.timestamp.strftime("%Y-%m-%d %H:%M") if hasattr(h.timestamp, "strftime") else "Unknown"
+            "time": _ist(h.timestamp)
         } for h in history
     ]}
 
@@ -1281,13 +1283,17 @@ def update_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update one or more settings. API keys are stored as-is (not hashed)."""
+    """Update one or more settings (account owner only). API keys are stored as-is."""
+    _require_admin(current_user, db)
     updated = []
     for key, value in payload.settings.items():
         if key not in _SETTING_DEFAULTS:
             continue   # ignore unknown keys
-        # Don't overwrite a real key with a masked placeholder
-        if key in _SECRET_KEYS and value and all(c == "•" for c in value[:-4]):
+        value = "" if value is None else str(value).strip()
+        if len(value) > 4000:
+            raise HTTPException(status_code=400, detail=f"{key}: value too long")
+        # Don't overwrite a real key with its masked placeholder ("••••••abcd")
+        if key in _SECRET_KEYS and len(value) > 4 and set(value[:-4]) == {"•"}:
             continue
         row = db.query(AppSettings).filter(AppSettings.key == key).first()
         if row:
@@ -1458,7 +1464,9 @@ def data_health(probe: bool = False, symbols: Optional[str] = None,
 
 
 @router.post("/api/data/clear-cache")
-def data_clear_cache(symbol: Optional[str] = None, current_user: User = Depends(get_current_user)):
+def data_clear_cache(symbol: Optional[str] = None, db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    _require_admin(current_user, db)
     from app.services.market_data import market_data, HEALTH
     market_data.clear_cache(symbol)
     if not symbol:
@@ -1520,24 +1528,40 @@ def market_pulse(current_user: User = Depends(get_current_user)):
 
 @router.get("/api/portfolio/summary")
 def portfolio_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Paper account value = starting capital + realised P&L + unrealised P&L."""
+    """Paper account value in INR = starting capital + realised + unrealised P&L.
+    USD-priced positions/trades are converted at a live USD/INR rate."""
     from app.services.market_data import market_data
+    from app.services.trading_utils import currency_of, to_inr, usd_inr, ist_day_start_utc
     capital = float(os.getenv("PAPER_STARTING_CAPITAL", "1000000"))
-    realised = float(db.query(func.sum(TradeRecord.pnl)).filter(
-        TradeRecord.user_id == current_user.id).scalar() or 0.0)
-    today_realised = float(db.query(func.sum(TradeRecord.pnl)).filter(
-        TradeRecord.user_id == current_user.id,
-        func.date(TradeRecord.timestamp) == date.today()).scalar() or 0.0)
-    unrealised, invested = 0.0, 0.0
+    day_start = ist_day_start_utc()
+    realised = today_realised = 0.0
+    for r in db.query(TradeRecord).filter(TradeRecord.user_id == current_user.id, TradeRecord.pnl != 0).all():
+        v = to_inr(r.pnl or 0.0, currency_of(r.asset))
+        realised += v
+        if r.timestamp and r.timestamp >= day_start:
+            today_realised += v
+    unrealised = invested = day_unrealised = 0.0
     for p in db.query(ActivePosition).filter(ActivePosition.user_id == current_user.id,
                                              ActivePosition.status == "OPEN").all():
+        cur = currency_of(p.asset)
         q = market_data.get_quote_info(p.asset)
         ltp = q["price"] or p.entry_price
         sign = 1 if (p.direction or "BUY").upper() == "BUY" else -1
-        unrealised += sign * (ltp - p.entry_price) * p.quantity
-        invested += p.entry_price * p.quantity
+        unrealised += to_inr(sign * (ltp - p.entry_price) * p.quantity, cur)
+        invested += to_inr(p.entry_price * p.quantity, cur)
+        # today's move: from entry if opened today, else from the previous close
+        ref = p.entry_price
+        if not (p.entry_time and p.entry_time >= day_start):
+            try:
+                d = market_data.get_ohlcv(p.asset, period="10d", interval="1d")
+                if len(d) >= 2:
+                    ref = float(d["Close"].iloc[-2]) if not q["stale"] else float(d["Close"].iloc[-1])
+            except Exception:
+                pass
+        day_unrealised += to_inr(sign * (ltp - ref) * p.quantity, cur)
     value = capital + realised + unrealised
-    day_pnl = today_realised + unrealised
+    day_pnl = today_realised + day_unrealised
+    rate, rate_src = usd_inr()
 
     # Paper mutual-fund holdings are a separate bucket (not funded from trading capital)
     mf = {"invested": 0.0, "value": 0.0}
@@ -1564,6 +1588,9 @@ def portfolio_summary(db: Session = Depends(get_db), current_user: User = Depend
         "day_pnl": round(day_pnl, 2),
         "day_pnl_pct": round(day_pnl / (value - day_pnl) * 100, 2) if value - day_pnl else 0.0,
         "mutual_funds": mf,
+        "usd_inr": round(rate, 4),
+        "fx_note": f"USD positions converted at {rate:.2f} INR/USD ({rate_src})",
+        "currency": "INR",
         "mode": "PAPER",
     }
 
@@ -1585,7 +1612,8 @@ def export_ohlcv(req: ExportRequest, current_user: User = Depends(get_current_us
     from concurrent.futures import ThreadPoolExecutor
     from app.core.config import SERVERLESS, BACKEND_DIR
     from app.services import market_data as md
-    if SERVERLESS:
+    from app.core.config import env_flag
+    if SERVERLESS or not env_flag("ASTRA_ENABLE_EXPORT", _AUTH_MODE == "bypass"):
         raise HTTPException(status_code=404, detail="Not available on hosted deploys")
     out_dir = BACKEND_DIR / "data" / "export"
     out_dir.mkdir(parents=True, exist_ok=True)

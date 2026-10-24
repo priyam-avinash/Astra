@@ -23,3 +23,4 @@ backend/data/
 !.env.example
 backend/models_oos/
 backend/scripts/out/
+.claude/worktrees/

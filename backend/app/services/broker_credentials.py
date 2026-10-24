@@ -9,7 +9,7 @@ encrypted before hitting the DB.
 
 Used by:
   - /upstox/callback (and future /dhan/login, /zerodha/login) to persist
-    the OAuth token to the current user
+    the OAuth token to the current user (state + browser-binding cookie)
   - BrokerClient adapters to retrieve a user's tokens when serving requests
 
 Design choice — fallback to env vars:
@@ -127,6 +127,33 @@ def list_user_brokers(db: Session, user_id: int) -> list[dict]:
             "updated_at":  r.updated_at.isoformat() if r.updated_at else None,
         })
     return out
+
+
+# ── OAuth state ↔ browser binding ──────────────────────────────────────────
+# The signed `state` says WHICH user started the flow; this cookie proves the
+# browser finishing the flow is the one that started it. Without it, an
+# attacker could start a flow for their own account, send the Upstox login
+# link to a victim, and have the victim's broker token stored on the
+# attacker's account. The cookie holds sha256(state), so it needs no
+# server-side storage and is useless without the matching state.
+
+OAUTH_BINDING_TTL_SECONDS = 600
+
+
+def oauth_binding_cookie_name(broker: str) -> str:
+    return f"astra_oauth_{_normalize(broker)}"
+
+
+def oauth_binding_value(state: str) -> str:
+    import hashlib
+    return hashlib.sha256((state or "").encode()).hexdigest()
+
+
+def verify_oauth_binding(cookie_value: Optional[str], state: str) -> bool:
+    import hmac
+    if not cookie_value or not state:
+        return False
+    return hmac.compare_digest(cookie_value, oauth_binding_value(state))
 
 
 def revoke(db: Session, user_id: int, broker: str) -> bool:

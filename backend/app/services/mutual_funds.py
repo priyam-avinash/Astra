@@ -36,6 +36,18 @@ class MFError(Exception):
     pass
 
 
+MAX_ACTIVE_SIPS = 25
+
+
+def canon_code(code) -> str:
+    """AMFI scheme codes are plain ASCII digits; normalise ' 0120503' → '120503'."""
+    import re as _re
+    c = str(code or "").strip()
+    if not _re.fullmatch(r"[0-9]{1,8}", c):
+        raise MFError("Scheme code must be a number")
+    return str(int(c))
+
+
 def _default_fetch(url: str, params: Optional[dict] = None) -> object:
     import requests
     r = requests.get(url, params=params, timeout=12, headers={"User-Agent": "ASTRA/1.14"})
@@ -74,9 +86,7 @@ class MutualFundService:
         return payload.get("meta") or {}, s
 
     def nav_history(self, code: str) -> tuple[dict, pd.Series]:
-        code = str(code).strip()
-        if not code.isdigit():
-            raise MFError("Scheme code must be numeric")
+        code = canon_code(code)
         hit = self._nav_cache.get(code)
         if hit and time.time() - hit[0] < NAV_TTL_SEC:
             return hit[1], hit[2]
@@ -125,6 +135,16 @@ class MutualFundService:
         return sorted(out, key=rank)[:limit]
 
     # ── analytics ────────────────────────────────────────────────────────
+    @staticmethod
+    def nav_for_order(s: pd.Series, d) -> tuple[Optional[pd.Timestamp], Optional[float]]:
+        """NAV an order placed on date d gets: the first NAV dated on/after d
+        (real funds price orders at the NAV declared for the order date or later,
+        never at an NAV already known). None if not published yet → PENDING."""
+        sub = s.loc[pd.Timestamp(d).normalize():]
+        if sub.empty:
+            return None, None
+        return sub.index[0], float(sub.iloc[0])
+
     @staticmethod
     def nav_on(s: pd.Series, d) -> tuple[Optional[pd.Timestamp], Optional[float]]:
         """NAV applicable on date d (last published NAV on or before d)."""
@@ -253,92 +273,141 @@ def _today() -> date:
     return date.today()
 
 
+def _holding(db, user_id: int, code: str, name: str):
+    from app.models.database import MFHolding
+    h = db.query(MFHolding).filter(MFHolding.user_id == user_id, MFHolding.scheme_code == code).first()
+    if h is None:
+        h = MFHolding(user_id=user_id, scheme_code=code, scheme_name=name, units=0.0, invested=0.0)
+        db.add(h)
+        db.flush()
+    return h
+
+
+def _settle(db, tx, s: pd.Series) -> bool:
+    """Price a PENDING transaction once the NAV for its order date is out."""
+    nd, nav = MutualFundService.nav_for_order(s, tx.order_date)
+    if nav is None:
+        return False
+    h = _holding(db, tx.user_id, tx.scheme_code, tx.scheme_name)
+    if tx.kind in ("BUY", "SIP"):
+        units = round(tx.amount / nav, 4)
+        h.units = round((h.units or 0) + units, 4)
+        h.invested = round((h.invested or 0) + tx.amount, 2)
+        tx.units = units
+    else:  # SELL — units were reserved when the order was placed
+        tx.amount = round(tx.units * nav, 2)
+        tx.realised_pnl = round(tx.amount - (tx.cost_basis or 0.0), 2)
+    tx.nav, tx.nav_date, tx.status = nav, nd.strftime("%Y-%m-%d"), "SETTLED"
+    return True
+
+
 def book_purchase(db, user_id: int, code: str, amount: float, kind: str = "BUY",
                   on: Optional[date] = None, sip_id: Optional[int] = None):
-    from app.models.database import MFHolding, MFTransaction
-    if amount is None or amount < 100:
+    from app.models.database import MFTransaction
+    code = canon_code(code)
+    if amount is None or not (amount >= 100):
         raise MFError("Minimum investment is ₹100")
     if amount > 1e8:
         raise MFError("Amount too large for a paper investment")
     meta, s = mf_service.nav_history(code)
-    nd, nav = MutualFundService.nav_on(s, on or _today())
-    if nav is None:
-        raise MFError("No NAV available for that date")
-    units = round(amount / nav, 4)
-    h = db.query(MFHolding).filter(MFHolding.user_id == user_id, MFHolding.scheme_code == str(code)).first()
-    if h is None:
-        h = MFHolding(user_id=user_id, scheme_code=str(code), scheme_name=meta.get("scheme_name"),
-                      units=0.0, invested=0.0)
-        db.add(h)
-    h.units = round((h.units or 0) + units, 4)
-    h.invested = round((h.invested or 0) + amount, 2)
-    tx = MFTransaction(user_id=user_id, scheme_code=str(code), scheme_name=meta.get("scheme_name"),
-                       kind=kind, amount=round(amount, 2), units=units, nav=nav,
-                       nav_date=nd.strftime("%Y-%m-%d"), sip_id=sip_id)
+    d = on or _today()
+    if pd.Timestamp(d) < s.index[0]:
+        raise MFError("The fund didn't exist on that date")
+    tx = MFTransaction(user_id=user_id, scheme_code=code, scheme_name=meta.get("scheme_name"),
+                       kind=kind, amount=round(amount, 2), units=0.0, nav=None, nav_date=None,
+                       sip_id=sip_id, status="PENDING", order_date=pd.Timestamp(d).strftime("%Y-%m-%d"))
     db.add(tx)
+    db.flush()
+    _settle(db, tx, s)
     return tx
 
 
 def book_redemption(db, user_id: int, code: str, units: Optional[float] = None,
                     amount: Optional[float] = None):
     from app.models.database import MFHolding, MFTransaction
-    h = db.query(MFHolding).filter(MFHolding.user_id == user_id, MFHolding.scheme_code == str(code)).first()
+    code = canon_code(code)
+    h = db.query(MFHolding).filter(MFHolding.user_id == user_id, MFHolding.scheme_code == code).first()
     if h is None or (h.units or 0) <= 0:
         raise MFError("You don't hold this fund")
     meta, s = mf_service.nav_history(code)
-    nd, nav = MutualFundService.nav_on(s, _today())
     if units is None:
         if amount is None or amount <= 0:
             raise MFError("Give units or an amount to redeem")
-        units = amount / nav
+        units = amount / float(s.iloc[-1])           # estimate; priced at the order date's NAV
     units = round(min(float(units), h.units), 4)
     if units <= 0:
         raise MFError("Nothing to redeem")
     avg_cost = (h.invested or 0) / h.units
-    proceeds = round(units * nav, 2)
-    pnl = round(proceeds - units * avg_cost, 2)
-    h.invested = round((h.invested or 0) - units * avg_cost, 2)
+    cost = round(units * avg_cost, 2)
+    h.invested = round((h.invested or 0) - cost, 2)
     h.units = round(h.units - units, 4)
     if h.units < 1e-4:
         h.units, h.invested = 0.0, 0.0
-    tx = MFTransaction(user_id=user_id, scheme_code=str(code), scheme_name=meta.get("scheme_name"),
-                       kind="SELL", amount=proceeds, units=units, nav=nav,
-                       nav_date=nd.strftime("%Y-%m-%d"), realised_pnl=pnl)
+    tx = MFTransaction(user_id=user_id, scheme_code=code, scheme_name=meta.get("scheme_name"),
+                       kind="SELL", amount=0.0, units=units, nav=None, nav_date=None,
+                       status="PENDING", order_date=_today().isoformat(), cost_basis=cost)
     db.add(tx)
+    db.flush()
+    _settle(db, tx, s)
     return tx
 
 
+def settle_pending(db, user_id: int) -> int:
+    from app.models.database import MFTransaction
+    n = 0
+    for tx in db.query(MFTransaction).filter(MFTransaction.user_id == user_id, MFTransaction.status == "PENDING").all():
+        try:
+            _, s = mf_service.nav_history(tx.scheme_code)
+            n += int(_settle(db, tx, s))
+        except MFError:
+            continue
+    if n:
+        db.commit()
+    return n
+
+
 def run_due_sips(db, user_id: int) -> int:
-    """Book every SIP instalment due up to today (each at its own date's NAV)."""
+    """Book every SIP instalment due up to today (each priced at its own date's NAV).
+    Each instalment date is claimed atomically, so concurrent loads can't double-book."""
     from app.models.database import MFSip
     booked = 0
     today = _today()
     for sip in db.query(MFSip).filter(MFSip.user_id == user_id, MFSip.active == True).all():  # noqa: E712
+        try:
+            _, s = mf_service.nav_history(sip.scheme_code)
+        except MFError:
+            continue
+        first_nav = s.index[0].date()
         start = date.fromisoformat(sip.start_date)
-        last = date.fromisoformat(sip.last_run_date) if sip.last_run_date else None
         d = date(start.year, start.month, sip.day_of_month)
         if d < start:
             d = (pd.Timestamp(d) + pd.DateOffset(months=1)).date()
         guard = 0
         while d <= today and guard < 600:
             guard += 1
-            if last is None or d > last:
-                try:
-                    book_purchase(db, user_id, sip.scheme_code, sip.amount, kind="SIP", on=d, sip_id=sip.id)
-                    sip.last_run_date = d.isoformat()
-                    booked += 1
-                except MFError as e:
-                    logger.info(f"[mf] SIP {sip.id} instalment {d} skipped: {e}")
-                    break
+            last = sip.last_run_date
+            if d >= first_nav and (last is None or d.isoformat() > last):
+                claimed = db.query(MFSip).filter(
+                    MFSip.id == sip.id,
+                    (MFSip.last_run_date == None) | (MFSip.last_run_date < d.isoformat())  # noqa: E711
+                ).update({MFSip.last_run_date: d.isoformat()}, synchronize_session=False)
+                db.commit()
+                db.refresh(sip)
+                if claimed:
+                    try:
+                        book_purchase(db, user_id, sip.scheme_code, sip.amount, kind="SIP", on=d, sip_id=sip.id)
+                        db.commit()
+                        booked += 1
+                    except MFError as e:
+                        logger.info(f"[mf] SIP {sip.id} instalment {d} skipped: {e}")
             d = (pd.Timestamp(d) + pd.DateOffset(months=1)).date()
-    if booked:
-        db.commit()
     return booked
 
 
 def portfolio(db, user_id: int) -> dict:
     from app.models.database import MFHolding, MFSip, MFTransaction
     run_due_sips(db, user_id)
+    settle_pending(db, user_id)
     rows, total_inv, total_val = [], 0.0, 0.0
     for h in db.query(MFHolding).filter(MFHolding.user_id == user_id, MFHolding.units > 0).all():
         try:
@@ -349,7 +418,8 @@ def portfolio(db, user_id: int) -> dict:
         value = round(h.units * nav, 2) if nav else None
         flows = [(datetime.strptime(t.nav_date, "%Y-%m-%d").date(), -t.amount if t.kind != "SELL" else t.amount)
                  for t in db.query(MFTransaction).filter(MFTransaction.user_id == user_id,
-                                                         MFTransaction.scheme_code == h.scheme_code).all()]
+                                                         MFTransaction.scheme_code == h.scheme_code,
+                                                         MFTransaction.status == "SETTLED").all()]
         if value:
             flows.append((_today(), value))
         rows.append({
@@ -364,11 +434,13 @@ def portfolio(db, user_id: int) -> dict:
     sips = [{"id": x.id, "scheme_code": x.scheme_code, "scheme_name": x.scheme_name, "amount": x.amount,
              "day_of_month": x.day_of_month, "start_date": x.start_date, "last_run_date": x.last_run_date}
             for x in db.query(MFSip).filter(MFSip.user_id == user_id, MFSip.active == True).all()]  # noqa: E712
-    txs = [{"date": t.nav_date, "scheme_name": t.scheme_name, "kind": t.kind, "amount": t.amount,
+    txs = [{"date": t.nav_date or t.order_date, "order_date": t.order_date, "status": t.status or "SETTLED",
+            "scheme_name": t.scheme_name, "kind": t.kind, "amount": t.amount,
             "units": t.units, "nav": t.nav, "realised_pnl": t.realised_pnl}
            for t in db.query(MFTransaction).filter(MFTransaction.user_id == user_id)
            .order_by(MFTransaction.id.desc()).limit(50).all()]
-    return {"holdings": rows, "sips": sips, "transactions": txs,
+    pending = [t for t in txs if t["status"] == "PENDING"]
+    return {"holdings": rows, "sips": sips, "transactions": txs, "pending_orders": pending,
             "total_invested": round(total_inv, 2), "total_value": round(total_val, 2),
             "total_gain": round(total_val - total_inv, 2),
             "total_gain_pct": round((total_val / total_inv - 1) * 100, 2) if total_inv else None,

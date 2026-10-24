@@ -60,29 +60,69 @@ def test_signals_queue_has_no_fake_seed(client):
     assert client.get("/api/signals").json()["queue"] == []
 
 
+def _make_signal(client, asset, side="BUY", entry=1480.0, sl=1450.0, tp=1550.0):
+    r = client.post("/api/signals", json={"asset": asset, "type": "Equity", "signal": side, "confidence": 70,
+                                          "entry_price": entry, "target_price": tp, "stop_loss": sl,
+                                          "engine": "astra_ai"})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
 def test_execute_records_fill_price_and_monitor_auto_exits(client, price, monkeypatch):
     monkeypatch.setattr("app.services.ai_predictor.AIPredictionEngine._fetch_data",
                         lambda self, *a, **k: pd.DataFrame())
     price["p"] = 1000.0
-    r = client.post("/api/execute", json={"id": 0, "asset": "TESTCO.NS", "action": "BUY",
-                                          "quantity": 10, "price": 1480.0,   # stale signal price
-                                          "target_price": 1050.0, "stop_loss": 980.0})
+    sid = _make_signal(client, "TESTCO.NS")                 # stale signal priced at 1480
+    r = client.post("/api/execute", json={"id": sid, "asset": "TESTCO.NS", "action": "BUY",
+                                          "quantity": 10, "price": 1480.0,
+                                          "target_price": 1550.0, "stop_loss": 1450.0})
     assert r.status_code == 200, r.text
     assert r.json()["mode"] == "PAPER"
     pos = [p for p in client.get("/api/positions").json()["positions"] if p["asset"] == "TESTCO.NS"][0]
     # entry = real LTP + 0.05% slippage, NOT the 1480 the client sent
     assert pos["entry_price"] == pytest.approx(1000.5, abs=0.01)
+    # SL/TP keep the signal's distances (30 / 70) but are measured from the fill
+    assert pos["stop_loss"] == pytest.approx(970.5, abs=0.01)
+    assert pos["target_price"] == pytest.approx(1070.5, abs=0.01)
+    assert pos["currency"] == "INR"
+
+    # the same signal can't be executed twice
+    r2 = client.post("/api/execute", json={"id": sid, "asset": "TESTCO.NS", "action": "BUY",
+                                           "quantity": 10, "price": 1480.0})
+    assert r2.status_code == 409
 
     # price moves through target → background monitor closes it
     from app.services.tasks import monitor_active_positions
     monkeypatch.setattr("app.services.tasks.dispatch", lambda *a, **k: None)
-    price["p"] = 1060.0
+    price["p"] = 1080.0
     monitor_active_positions()
     open_assets = [p["asset"] for p in client.get("/api/positions").json()["positions"]]
     assert "TESTCO.NS" not in open_assets
     hist = [h for h in client.get("/api/history").json()["history"] if h["asset"] == "TESTCO.NS"]
-    closing = [h for h in hist if "Target" in h["action"]][0]
-    assert closing["pnl"] > 0
+    closing = [h for h in hist if "Target" in h["action"]]
+    assert len(closing) == 1 and closing[0]["pnl"] > 0
+
+
+def test_squareoff_twice_books_once(client, price, monkeypatch):
+    monkeypatch.setattr("app.services.ai_predictor.AIPredictionEngine._fetch_data",
+                        lambda self, *a, **k: pd.DataFrame())
+    price["p"] = 500.0
+    r = client.post("/api/execute/manual", json={"asset": "DBLCO.NS", "action": "BUY", "quantity": 4, "price": 500.0})
+    assert r.status_code == 200, r.text
+    pid = [p for p in client.get("/api/positions").json()["positions"] if p["asset"] == "DBLCO.NS"][0]["id"]
+    price["p"] = 510.0
+    assert client.post(f"/api/positions/squareoff/{pid}").status_code == 200
+    assert client.post(f"/api/positions/squareoff/{pid}").status_code == 409
+    closes = [h for h in client.get("/api/history").json()["history"]
+              if h["asset"] == "DBLCO.NS" and "Square Off" in h["action"]]
+    assert len(closes) == 1
+
+
+@pytest.mark.market_closed
+def test_nse_orders_rejected_when_market_closed(client, price):
+    price["p"] = 100.0
+    r = client.post("/api/execute/manual", json={"asset": "CLOSEDCO.NS", "action": "BUY", "quantity": 1, "price": 100})
+    assert r.status_code == 503 and "closed" in r.json()["detail"].lower()
 
 
 def test_manual_order_rejects_bad_input(client, price):

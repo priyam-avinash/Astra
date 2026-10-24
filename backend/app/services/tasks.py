@@ -92,6 +92,7 @@ def reflect_on_closed_trade(
     fund_grade:     str = "C",
     debate_verdict: str = "CONFIRMED",
     risk_verdict:   str = "GREEN",
+    position_id:    int = None,
 ):
     """
     Async task: generate a reflection for a closed trade and store it + lessons.
@@ -140,10 +141,13 @@ def reflect_on_closed_trade(
             # Copy entry features from the matching ActivePosition (if captured)
             try:
                 from app.models.database import ActivePosition
-                pos = db.query(ActivePosition).filter(
-                    ActivePosition.asset   == symbol,
-                    ActivePosition.status  != "OPEN",
-                ).order_by(ActivePosition.exit_time.desc()).first()
+                if position_id is not None:
+                    pos = db.query(ActivePosition).filter(ActivePosition.id == position_id).first()
+                else:
+                    pos = db.query(ActivePosition).filter(
+                        ActivePosition.asset == symbol, ActivePosition.status == "CLOSED",
+                        ActivePosition.user_id == trade.user_id,
+                    ).order_by(ActivePosition.exit_time.desc()).first()
                 if pos and pos.entry_features_json:
                     trade.entry_features_json = pos.entry_features_json
             except Exception as _fe:
@@ -152,7 +156,7 @@ def reflect_on_closed_trade(
             db.commit()
             logger.info(
                 f"Trade {trade_id} ({symbol}) labelled {trade.signal_label} "
-                f"({pnl_pct:+.2%}). Reflection: {reflection_text[:60]}…"
+                f"({pnl_pct:+.2f}%). Reflection: {reflection_text[:60]}…"
             )
 
         return {"trade_id": trade_id, "symbol": symbol, "reflection": reflection_text}
@@ -164,148 +168,92 @@ def reflect_on_closed_trade(
         db.close()
 
 
+
+
+def check_and_close_position(db, p, current_price: float) -> bool:
+    """SL / target / breakeven-trailing check for one OPEN position at a LIVE price.
+    Closes it through the shared atomic path. Returns True if it is (being) closed."""
+    from app.services.broker import broker_service
+    from app.services.positions import claim_position, release_position, book_close
+
+    # Trailing stop: move SL to breakeven once price has covered half the target distance
+    if p.target_price and p.entry_price:
+        halfway = abs(p.target_price - p.entry_price) * 0.5
+        if p.direction == "BUY" and current_price >= p.entry_price + halfway:
+            if not p.stop_loss or p.stop_loss < p.entry_price:
+                p.stop_loss = p.entry_price
+                db.commit()
+                logger.info(f"TSL activated for {p.asset}: SL → breakeven {p.entry_price}")
+        elif p.direction == "SELL" and current_price <= p.entry_price - halfway:
+            if not p.stop_loss or p.stop_loss > p.entry_price:
+                p.stop_loss = p.entry_price
+                db.commit()
+                logger.info(f"TSL activated for {p.asset}: SL → breakeven {p.entry_price}")
+
+    reason = None
+    if p.direction == "BUY":
+        if p.target_price and current_price >= p.target_price:
+            reason = "Target Hit"
+        elif p.stop_loss and current_price <= p.stop_loss:
+            reason = "Stop Loss Hit"
+    else:
+        if p.target_price and current_price <= p.target_price:
+            reason = "Target Hit"
+        elif p.stop_loss and current_price >= p.stop_loss:
+            reason = "Stop Loss Hit"
+    if not reason:
+        return False
+    if not claim_position(db, p.id):
+        return True                      # another closer won the race
+    db.refresh(p)
+    exit_action = "SELL" if p.direction == "BUY" else "BUY"
+    try:
+        res = broker_service.execute_trade(asset=p.asset, action=exit_action, quantity=p.quantity, price=current_price)
+        fill = float(res["executed_price"])
+        pnl, rec = book_close(db, p, fill, f"{reason} (Auto)", "Closed (Auto)", order=res)
+    except Exception as e:
+        db.rollback()
+        release_position(db, p.id)
+        logger.warning(f"Auto-exit of {p.asset} failed ({e}); will retry")
+        return False
+    logger.info(f"AUTO-EXIT: {p.asset} {reason} at {fill} (pnl {pnl})")
+    pnl_pct = ((fill - p.entry_price) / p.entry_price) * (1 if p.direction == "BUY" else -1) * 100
+    try:
+        dispatch(reflect_on_closed_trade, trade_id=rec.id, symbol=p.asset, original_signal=p.direction,
+                 confidence=50.0, entry_price=p.entry_price, exit_price=fill, pnl=pnl,
+                 pnl_pct=round(pnl_pct, 3), exit_reason=reason, position_id=p.id)
+    except Exception as rf_err:
+        logger.debug(f"Reflection dispatch failed (non-critical): {rf_err}")
+    try:
+        from app.services.replay_buffer import replay_buffer
+        import json as _json
+        feats = _json.loads(p.entry_features_json) if getattr(p, "entry_features_json", None) else {}
+        replay_buffer.push(symbol=p.asset, features=feats,
+                           outcome={"pnl_pct": round(pnl_pct, 3), "hit_target": reason == "Target Hit",
+                                    "hit_sl": reason == "Stop Loss Hit", "bars_held": 0, "direction": p.direction},
+                           engine=getattr(p, "engine", "unknown"))
+    except Exception as e:
+        logger.debug(f"Replay buffer push failed: {e}")
+    return True
+
+
 @celery_app.task(name="monitor_active_positions")
 def monitor_active_positions():
-    """
-    Background worker that checks SL/TP for all open positions.
-    """
-    from app.models.database import SessionLocal, ActivePosition, TradeRecord
-    from app.services.ai_predictor import ai_engine
-    from app.services.broker import broker_service
-    
+    """Background worker: SL/TP/trailing for all open positions (live prices only)."""
+    from app.models.database import SessionLocal, ActivePosition
+    from app.services.market_data import market_data
     db = SessionLocal()
     try:
-        # 1. Fetch all open positions
         positions = db.query(ActivePosition).filter(ActivePosition.status == "OPEN").all()
         if not positions:
             return "No open positions to monitor."
-
-        results = []
+        closed = 0
         for p in positions:
-            # 2. Get current price — never act on stale/cached prices
-            from app.services.market_data import market_data
             q = market_data.get_quote_info(p.asset)
-            current_price = q["price"]
-            if current_price <= 0 or q["stale"]:
+            if q["price"] <= 0 or q["stale"]:
                 continue
-
-            # Trailing Stop Loss (TSL): Auto-Breakeven at 50% Target
-            if p.target_price and p.entry_price:
-                halfway = abs(p.target_price - p.entry_price) * 0.5
-                if p.direction == "BUY" and current_price >= p.entry_price + halfway:
-                    if not p.stop_loss or p.stop_loss < p.entry_price:
-                        p.stop_loss = p.entry_price
-                        db.commit()
-                        logger.info(f"TSL Activated for {p.asset}: SL moved to breakeven {p.entry_price}")
-                elif p.direction == "SELL" and current_price <= p.entry_price - halfway:
-                    if not p.stop_loss or p.stop_loss > p.entry_price:
-                        p.stop_loss = p.entry_price
-                        db.commit()
-                        logger.info(f"TSL Activated for {p.asset}: SL moved to breakeven {p.entry_price}")
-
-            # 3. Check SL/TP
-            triggered = False
-            exit_reason = ""
-            
-            if p.direction == "BUY":
-                if p.target_price and current_price >= p.target_price:
-                    triggered = True; exit_reason = "Target Hit (Auto)"
-                elif p.stop_loss and current_price <= p.stop_loss:
-                    triggered = True; exit_reason = "Stop Loss Hit (Auto)"
-            else: # SELL
-                if p.target_price and current_price <= p.target_price:
-                    triggered = True; exit_reason = "Target Hit (Auto)"
-                elif p.stop_loss and current_price >= p.stop_loss:
-                    triggered = True; exit_reason = "Stop Loss Hit (Auto)"
-
-            if triggered:
-                # 4. Execute Square Off
-                exit_action = "SELL" if p.direction == "BUY" else "BUY"
-                try:
-                    broker_res = broker_service.execute_trade(
-                        asset=p.asset,
-                        action=exit_action,
-                        quantity=p.quantity,
-                        price=current_price
-                    )
-                    current_price = float(broker_res.get("executed_price") or current_price)
-
-                    # Update DB
-                    p.status = "CLOSED"
-                    p.exit_price = current_price
-                    p.exit_time = datetime.utcnow()
-
-                    pnl = (current_price - p.entry_price) * p.quantity if p.direction == "BUY" else (p.entry_price - current_price) * p.quantity
-                    pnl_pct = ((current_price - p.entry_price) / p.entry_price) * (1 if p.direction == "BUY" else -1) * 100
-
-                    new_history = TradeRecord(
-                        user_id=p.user_id,
-                        trade_id=f"AUTO-{p.id}-{datetime.now().strftime('%M%S')}",
-                        asset=p.asset,
-                        action=f"{exit_action} ({exit_reason})",
-                        price=current_price,
-                        quantity=p.quantity,
-                        pnl=round(pnl, 2),
-                        status="Closed (Worker)"
-                    )
-                    db.add(new_history)
-                    db.commit()
-                    db.refresh(new_history)
-                    logger.info(f"AUTO-EXIT: {p.asset} {exit_reason} at {current_price}")
-                    results.append(f"Closed {p.asset} due to {exit_reason}")
-
-                    # ── Trigger async reflection / learning ──────────────
-                    try:
-                        dispatch(
-                            reflect_on_closed_trade,
-                            trade_id=new_history.id,
-                            symbol=p.asset,
-                            original_signal=p.direction,
-                            confidence=50.0,   # best effort
-                            entry_price=p.entry_price,
-                            exit_price=current_price,
-                            pnl=round(pnl, 2),
-                            pnl_pct=round(pnl_pct, 3),
-                            exit_reason=exit_reason,
-                        )
-                    except Exception as rf_err:
-                        logger.warning(f"Reflection task dispatch failed (non-critical): {rf_err}")
-
-                    # ── Push to replay buffer for self-learning ──────────────
-                    try:
-                        from app.services.replay_buffer import replay_buffer
-                        entry_features = {}
-                        if hasattr(p, "entry_features_json") and p.entry_features_json:
-                            import json as _json
-                            entry_features = _json.loads(p.entry_features_json)
-                        replay_buffer.push(
-                            symbol=p.asset,
-                            features=entry_features,
-                            outcome={
-                                "pnl_pct":    round(pnl_pct, 3),
-                                "hit_target": "Target" in exit_reason,
-                                "hit_sl":     "Stop" in exit_reason,
-                                "bars_held":  0,   # Could compute from entry_time
-                                "direction":  p.direction,
-                            },
-                            engine=getattr(p, "engine", "unknown"),
-                        )
-                        # Check for drift and schedule emergency retrain if needed
-                        drift = replay_buffer.drift_check()
-                        if drift["drift_detected"]:
-                            logger.warning(
-                                f"🚨 DRIFT DETECTED: recent WR={drift['recent_win_rate']:.1f}% "
-                                f"vs overall={drift['overall_win_rate']:.1f}%. "
-                                f"Consider retraining."
-                            )
-                    except Exception as rb_err:
-                        logger.warning(f"Replay buffer push failed (non-critical): {rb_err}")
-
-                except Exception as e:
-                    logger.error(f"Failed to auto-exit {p.asset}: {e}")
-                    db.rollback()
-        
-        return results if results else "Monitor cycle complete. No exits triggered."
-        
+            if check_and_close_position(db, p, float(q["price"])):
+                closed += 1
+        return f"Monitored {len(positions)} positions, closed {closed}."
     finally:
         db.close()

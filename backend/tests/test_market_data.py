@@ -31,7 +31,8 @@ def yahoo_chart(n=300, start=1000.0, interval_sec=86400, tz="Asia/Kolkata"):
     ts = [t0 + i * interval_sec for i in range(n)]
     closes = list(start + np.cumsum(np.random.default_rng(1).normal(0, 5, n)))
     return {"chart": {"result": [{
-        "meta": {"regularMarketPrice": closes[-1], "exchangeTimezoneName": tz},
+        "meta": {"regularMarketPrice": closes[-1], "exchangeTimezoneName": tz,
+                 "regularMarketTime": int(__import__("time").time()) - 60},
         "timestamp": ts,
         "indicators": {"quote": [{"open": closes, "high": [c + 3 for c in closes],
                                   "low": [c - 3 for c in closes], "close": closes,

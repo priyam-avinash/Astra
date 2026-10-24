@@ -1,9 +1,10 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 import asyncio
 import json
 import logging
 import os
 from datetime import datetime
+from typing import Optional
 
 import redis.asyncio as aioredis # type: ignore
 
@@ -15,9 +16,77 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # Fallback poll interval (seconds) when DhanFeed is not live
 _FALLBACK_POLL_INTERVAL = 15
 
+# Per-connection cap on explicit {"action": "subscribe"} symbols — each one is
+# polled through market_data, so an unbounded set is a cheap DoS.
+MAX_SUBSCRIPTIONS_PER_CONNECTION = 50
+
+_DEFAULT_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+
+
+# ── Handshake auth ───────────────────────────────────────────────────────────
+# Browsers can't set an Authorization header on a WebSocket, so the access JWT
+# comes as ?token=. Cross-site pages could otherwise open these sockets with
+# the victim's network position, so Origin is checked too (when sent).
+
+def _allowed_origins() -> set:
+    raw = os.getenv("FRONTEND_ORIGINS", _DEFAULT_ORIGINS)
+    return {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+
+
+def _origin_ok(websocket: WebSocket) -> bool:
+    origin = (websocket.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        return True          # non-browser client (CLI, tests) — token still required in jwt mode
+    if origin in _allowed_origins():
+        return True
+    host = websocket.headers.get("host", "")
+    return bool(host) and origin in (f"http://{host}", f"https://{host}")   # same origin
+
+
+def _user_exists(username: str) -> bool:
+    from app.models.database import SessionLocal, User
+    db = SessionLocal()
+    try:
+        return db.query(User.id).filter(User.username == username).first() is not None
+    finally:
+        db.close()
+
+
+async def _authenticate_ws(websocket: WebSocket) -> Optional[str]:
+    """Return a principal name if the handshake may proceed, else None.
+    Must be called BEFORE accept(); the caller closes with 1008 on None."""
+    if not _origin_ok(websocket):
+        logger.warning("WS %s: rejected origin %r", websocket.url.path, websocket.headers.get("origin"))
+        return None
+    if (os.getenv("AUTH_MODE", "jwt") or "jwt").strip().lower() == "bypass":
+        return "admin_bypass"
+    token = websocket.query_params.get("token") or ""
+    if not token:
+        return None
+    try:
+        from app.services.auth import decode_access_token
+        username = decode_access_token(token)["sub"]
+    except Exception:
+        return None
+    try:
+        if not await asyncio.to_thread(_user_exists, username):
+            return None
+    except Exception as e:
+        logger.warning("WS auth: user lookup failed: %s", e)
+        return None
+    return username
+
+
+async def _reject(websocket: WebSocket):
+    # close() before accept() → the handshake is refused (HTTP 403)
+    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+
 
 @router.websocket("/ws/market-data")
 async def websocket_market_data(websocket: WebSocket):
+    if await _authenticate_ws(websocket) is None:
+        await _reject(websocket)
+        return
     await websocket.accept()
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
     pubsub = redis_client.pubsub()
@@ -60,7 +129,13 @@ async def websocket_prices(websocket: WebSocket):
 
     Client → server:
         {"action": "subscribe", "symbol": "RELIANCE"}
+
+    Auth: ?token=<access JWT> (not needed with AUTH_MODE=bypass); the Origin,
+    when present, must be in FRONTEND_ORIGINS or same-origin.
     """
+    if await _authenticate_ws(websocket) is None:
+        await _reject(websocket)
+        return
     await websocket.accept()
     logger.info("WS /ws/prices: client connected")
 
@@ -130,8 +205,14 @@ async def websocket_prices(websocket: WebSocket):
                 try:
                     msg = json.loads(raw)
                     if msg.get("action") == "subscribe":
-                        sym = str(msg.get("symbol", "")).strip().upper()
+                        sym = str(msg.get("symbol", "")).strip().upper()[:32]
                         if sym and sym not in subscribed_symbols:
+                            if len(subscribed_symbols) >= MAX_SUBSCRIPTIONS_PER_CONNECTION:
+                                await websocket.send_json({
+                                    "type": "error", "symbol": sym,
+                                    "error": f"subscription limit ({MAX_SUBSCRIPTIONS_PER_CONNECTION}) reached",
+                                })
+                                continue
                             subscribed_symbols.add(sym)
                             # Also subscribe in feed manager for future connections
                             if dhan_feed_manager is not None:

@@ -36,7 +36,9 @@ def _resolve_secret_key() -> str:
 
 
 SECRET_KEY = _resolve_secret_key()
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+# Pinned: JWT_ALGORITHM env is deliberately ignored (no "none"/asymmetric confusion).
+ALGORITHM = "HS256"
+ACCESS_TOKEN_TYPE = "access"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", 60 * 24 * 7)) # 7 days
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -53,6 +55,35 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    to_encode.pop("purpose", None)
+    to_encode.update({"exp": expire, "typ": ACCESS_TOKEN_TYPE})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+
+def is_access_payload(payload: dict, allow_legacy: bool = True) -> bool:
+    """True if a decoded JWT payload is a login/access token.
+
+    Tokens signed for another purpose (OAuth `state`, which carries a
+    "purpose" claim) are never access tokens. Tokens issued before the
+    "typ" claim existed (no typ, no purpose) are accepted while
+    `allow_legacy` is True — they expire within ACCESS_TOKEN_EXPIRE_MINUTES
+    of this release, after which allow_legacy can be dropped.
+    """
+    if not isinstance(payload, dict) or payload.get("purpose") is not None:
+        return False
+    typ = payload.get("typ")
+    if typ is None:
+        return allow_legacy
+    return typ == ACCESS_TOKEN_TYPE
+
+
+def decode_access_token(token: str, allow_legacy: bool = True) -> dict:
+    """Decode + validate an access JWT. Raises JWTError on any failure,
+    including a valid signature on a non-access (e.g. OAuth state) token."""
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    if not is_access_payload(payload, allow_legacy=allow_legacy):
+        raise JWTError("Not an access token")
+    if not payload.get("sub"):
+        raise JWTError("Token has no 'sub' claim")
+    return payload

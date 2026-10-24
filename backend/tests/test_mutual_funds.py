@@ -6,11 +6,12 @@ import pandas as pd
 import pytest
 
 
-def _fake_payload(code="120503", years=6, cagr=0.12, name="Test Flexi Cap Fund - Direct Plan - Growth"):
-    end = date.today()
-    days = pd.bdate_range(end - timedelta(days=int(365.25 * years)), end)
+def _fake_payload(code="120503", years=6, cagr=0.12, name="Test Flexi Cap Fund - Direct Plan - Growth",
+                  end=None):
+    end = end or date.today()
+    days = pd.date_range(end - timedelta(days=int(365.25 * years)), end, freq="D")   # NAV every day incl. today
     n = len(days)
-    t = np.arange(n) / 250.0
+    t = np.arange(n) / 365.25
     nav = 10 * (1 + cagr) ** t
     rows = [{"date": d.strftime("%d-%m-%Y"), "nav": f"{v:.4f}"} for d, v in zip(days[::-1], nav[::-1])]
     return {"meta": {"scheme_code": int(code), "scheme_name": name, "fund_house": "Test AMC",
@@ -34,6 +35,7 @@ def svc(monkeypatch, tmp_path):
         return payloads[code]
 
     s = mf.MutualFundService(fetch=fetch)
+    s._payloads = payloads
     monkeypatch.setattr(mf, "mf_service", s)
     import app.api.mf_router as r
     monkeypatch.setattr(r, "mf_service", s)
@@ -118,3 +120,32 @@ def test_minimum_amount(svc, jwt_client, random_username):
     r = c.post("/api/mf/invest", json={"scheme_code": "120503", "amount": 50},
                headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 400
+
+
+def test_order_waits_for_order_date_nav(svc, jwt_client, random_username):
+    """An order placed before today's NAV is published is PENDING, then settles at that NAV."""
+    from app.services import mutual_funds as mf
+    svc._payloads["120503"] = _fake_payload(end=date.today() - timedelta(days=1))
+    svc._nav_cache.clear()
+    c = jwt_client
+    c.post("/api/auth/register", json={"username": random_username, "password": "pw_test_123"})
+    tok = c.post("/api/auth/token", data={"username": random_username, "password": "pw_test_123"}).json()["access_token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    r = c.post("/api/mf/invest", json={"scheme_code": " 0120503", "amount": 10000}, headers=h)
+    assert r.status_code == 200 and r.json()["status"] == "PENDING"
+    pf = c.get("/api/mf/portfolio", headers=h).json()
+    assert pf["holdings"] == [] and len(pf["pending_orders"]) == 1
+    # today's NAV gets published → the order settles at it, not at yesterday's
+    svc._payloads["120503"] = _fake_payload()
+    svc._nav_cache.clear()
+    pf = c.get("/api/mf/portfolio", headers=h).json()
+    assert len(pf["holdings"]) == 1 and pf["pending_orders"] == []
+    assert pf["holdings"][0]["nav_date"] == date.today().isoformat()
+
+
+def test_canonical_scheme_codes():
+    from app.services.mutual_funds import canon_code, MFError
+    assert canon_code(" 0120503") == "120503"
+    for bad in ("²", "١٢", "12a", "", "123456789"):
+        with pytest.raises(MFError):
+            canon_code(bad)

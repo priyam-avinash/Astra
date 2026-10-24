@@ -10,8 +10,8 @@ Dhan credentials, if configured, are used for market DATA only.
 
 import logging
 import os
-import random
 import time
+import uuid
 from datetime import datetime
 
 import app.core.config  # noqa: F401  (loads .env)
@@ -41,6 +41,11 @@ class PaperTradingEngine:
     def _get_ltp(self, asset: str, fallback: float) -> float:
         """Live LTP from the market-data layer; raises if only stale data is available."""
         from app.services.market_data import market_data
+        from app.services.trading_utils import is_india_equity, nse_open
+        if is_india_equity(asset) and not nse_open():
+            raise ValueError(
+                f"NSE is closed — paper orders for {asset} fill only during market hours "
+                "(Mon–Fri 09:15–15:30 IST), at the live price.")
         info = market_data.get_quote_info(asset)
         if info["price"] > 0 and not info["stale"]:
             return float(info["price"])
@@ -53,11 +58,12 @@ class PaperTradingEngine:
 
     def _fill_price(self, asset: str, action: str, user_price: float) -> float:
         """LTP ± slippage depending on order direction."""
+        from app.services.trading_utils import px
         ltp = self._get_ltp(asset, user_price)
         if action.upper() == "BUY":
-            return round(ltp * (1 + self.SLIPPAGE), 2)   # pay slightly above LTP
+            return px(ltp * (1 + self.SLIPPAGE))   # pay slightly above LTP
         else:
-            return round(ltp * (1 - self.SLIPPAGE), 2)   # receive slightly below LTP
+            return px(ltp * (1 - self.SLIPPAGE))   # receive slightly below LTP
 
     def get_exit_price(self, asset: str, direction: str) -> float:
         """
@@ -67,24 +73,28 @@ class PaperTradingEngine:
         """
         try:
             from app.services.market_data import market_data
-            ltp = market_data.get_quote(asset)
-            if ltp and ltp > 0:
+            from app.services.trading_utils import px
+            info = market_data.get_quote_info(asset)
+            ltp = info["price"]
+            if ltp and ltp > 0 and not info["stale"]:
                 if direction == "BUY":
-                    return round(ltp * (1 - self.SLIPPAGE), 2)
+                    return px(ltp * (1 - self.SLIPPAGE))
                 else:
-                    return round(ltp * (1 + self.SLIPPAGE), 2)
+                    return px(ltp * (1 + self.SLIPPAGE))
         except Exception as e:
             logger.warning(f"Exit price fetch failed for {asset}: {e}")
         return 0.0
 
     def execute_trade(self, asset: str, action: str, quantity: int, price: float) -> dict:
         """Place a paper order. Returns order dict with executed_price from real LTP."""
-        if quantity < 1:
+        if quantity <= 0 or quantity > 1_000_000:
             raise ValueError(f"Invalid quantity {quantity} for {asset}")
+        if action.upper() not in ("BUY", "SELL"):
+            raise ValueError(f"Invalid action {action!r} — must be BUY or SELL")
 
         fill      = self._fill_price(asset, action, price)
         brokerage = round(fill * quantity * self.BROKERAGE, 2)
-        order_id  = f"PAPER-{int(time.time())}-{random.randint(1000, 9999)}"
+        order_id  = f"PAPER-{uuid.uuid4().hex[:16].upper()}"
 
         order = {
             "order_id":        order_id,

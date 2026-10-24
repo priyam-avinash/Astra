@@ -200,6 +200,9 @@ class MFTransaction(Base):
     nav_date    = Column(String)                  # YYYY-MM-DD of the NAV used
     sip_id      = Column(Integer, nullable=True)
     realised_pnl = Column(Float, nullable=True)   # SELL only
+    status      = Column(String, default="SETTLED")   # SETTLED | PENDING (waiting for the order date's NAV)
+    order_date  = Column(String, nullable=True)       # YYYY-MM-DD the order/instalment was placed
+    cost_basis  = Column(Float, nullable=True)        # SELL: cost of the units redeemed
     created_at  = Column(DateTime, default=datetime.utcnow)
 
 
@@ -252,6 +255,10 @@ def _run_migrations():
         # v1.12 — self-learning feature capture
         ("trade_history",    "entry_features_json", "TEXT"),
         ("trade_history",    "signal_label",        "TEXT"),
+        # v1.14.1 — mutual fund settlement at the order date's NAV
+        ("mf_transactions",  "status",              "TEXT DEFAULT 'SETTLED'"),
+        ("mf_transactions",  "order_date",          "TEXT"),
+        ("mf_transactions",  "cost_basis",          "REAL"),
     ]
     from sqlalchemy import text as _sql_text
     if_not_exists = "" if IS_SQLITE else "IF NOT EXISTS "

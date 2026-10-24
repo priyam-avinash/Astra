@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.1 — 2026-10-24
+- Audit fixes: atomic position closes (no double booking), one-time signal execution, SL/TP re-anchored to fills, INR portfolio with live USD/INR, no fills on after-hours/stale quotes, NSE market-hours check, brokerage in P&L, IST trading day; mutual funds priced at the order date's NAV (pending until published), SIP double-booking fix; security: API keys scrubbed from errors, Upstox OAuth state + browser binding, WebSocket auth, owner-only settings/kill switch (persisted), safer registration, JWT typ claim, encrypted-credential key, Docker ports
+
 ## 1.14.0 — 2026-10-24
 - ASTRA.AI v2: 47-feature ranking model (Extra Trees, target-before-stop label), walk-forward-selected rules,
   live universe snapshot scoring; default engine in scanners and AI Predictions.

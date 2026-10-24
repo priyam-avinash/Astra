@@ -100,6 +100,19 @@ def _get_luong_attention_cls():
     return LuongAttention
 
 
+# ── ASTRA 1.0 rule configuration (tuned in research/tune_astra1.py) ───────────
+ASTRA1 = {
+    "rsi_max": 50.0,        # RSI pullback zone upper bound
+    "adx_min": 25.0,        # trend strength
+    "vol_min": 1.5,         # volume spike multiple
+    "bb_max": 0.35,         # near lower Bollinger band
+    "min_bull": 4,          # confirmations needed (of 7) when NIFTY > SMA200
+    "min_bear": 5,          # … when NIFTY < SMA200
+    "block_bear": False,    # True → no BUYs at all in a bear regime
+    "sl_atr": 1.5,
+    "tp_atr": 3.0,
+}
+
 # ── ASTRA.ML inference helpers (3-class BiLSTM) ───────────────────────────────
 # Decision thresholds on the model's class probabilities, tuned on the
 # out-of-sample validation window (see backend/scripts/evaluate_engines.py).
@@ -262,6 +275,7 @@ class AIPredictionEngine:
 
         # ── ASTRA 1.0 (Rule-Based Multi-Confirmation) ──
         if engine == "astra":
+            mult_sl, mult_tp = ASTRA1["sl_atr"], ASTRA1["tp_atr"]
             buy_ok, buy_conf, _ = self._check_buy_confirmations(last, patterns, macro_bull)
             sell_ok, sell_conf, _ = self._check_sell_confirmations(last, patterns)
 
@@ -539,25 +553,27 @@ class AIPredictionEngine:
 
         checks = {
             # 1. RSI dip-and-recover: pullback into 40-50 zone, now turning up
-            "RSI pullback & recovering":     float(row.get("RSI", 100)) < 50 and float(row.get("RSI_Slope", -1)) > 0,
+            "RSI pullback & recovering":     float(row.get("RSI", 100)) < ASTRA1["rsi_max"] and float(row.get("RSI_Slope", -1)) > 0,
             # 2. Price remains above long-term trend (uptrend structure)
             "Price above SMA200":            float(row.get("Dist_SMA200", -1)) > 0,
             # 3. Trend strength independent of price level
-            "Strong trend (ADX > 25)":       float(row.get("ADX", 0)) > 25,
+            "Strong trend (ADX > 25)":       float(row.get("ADX", 0)) > ASTRA1["adx_min"],
             # 4. MACD momentum turning bullish
             "MACD bullish crossover":        float(row.get("MACD", 0)) > float(row.get("MACD_Signal", 0)),
             # 5. Volume confirms the move
-            "Volume spike (>1.5x avg)":      float(row.get("Volume_Ratio", 0)) > 1.5,
+            "Volume spike (>1.5x avg)":      float(row.get("Volume_Ratio", 0)) > ASTRA1["vol_min"],
             # 6. Geometry: bullish body + support shadow (no pattern engine dependency)
             "Bullish candle (body + lower shadow)": bullish_candle,
             # 7. Near lower Bollinger Band (mean-reversion setup)
-            "Near lower Bollinger Band":     float(row.get("BB_PctB", 1.0)) < 0.35,
+            "Near lower Bollinger Band":     float(row.get("BB_PctB", 1.0)) < ASTRA1["bb_max"],
         }
         passed_count = sum(checks.values())
         score = (passed_count / 7) * 100
 
-        # Macro filter: bear market requires 5/7 (stricter)
-        threshold = 4 if macro_bull else 5
+        # Macro filter: bear market requires more confirmations (or blocks BUYs)
+        threshold = ASTRA1["min_bull"] if macro_bull else ASTRA1["min_bear"]
+        if not macro_bull and ASTRA1["block_bear"]:
+            return False, round(score, 1), checks
 
         return (passed_count >= threshold), round(score, 1), checks
 

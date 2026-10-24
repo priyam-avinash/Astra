@@ -9,7 +9,8 @@ Free historical OHLCV data for NSE equities via Upstox API v2.
 OAuth flow:
   1. User visits /upstox/login  → redirected to Upstox
   2. User logs in               → redirected to /upstox/callback?code=...
-  3. Backend exchanges code for access_token → stored in os.environ + .env
+  3. Backend exchanges code for access_token → stored per user (signed state),
+     or in os.environ + .env only for local AUTH_MODE=bypass dev without state
 
 Usage:
     from app.services.upstox_data import upstox_service
@@ -25,6 +26,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -171,15 +173,19 @@ class UpstoxDataService:
             return True
 
     def get_login_url(self) -> str:
-        return (
-            f"{_AUTH_URL}"
-            f"?response_type=code"
-            f"&client_id={self._api_key}"
-            f"&redirect_uri={self._redirect}"
-        )
+        return f"{_AUTH_URL}?" + urlencode({
+            "response_type": "code",
+            "client_id":     self._api_key,
+            "redirect_uri":  self._redirect,
+        })
 
     def exchange_code(self, code: str) -> str:
-        """Exchange OAuth code for access token. Stores in os.environ + .env."""
+        """Exchange an OAuth code for an access token and return it.
+
+        Does NOT persist anything: the caller decides where the token goes
+        (per-user BrokerCredential, or — local single-user dev only —
+        persist_global_token()).
+        """
         payload = {
             "code":          code,
             "client_id":     self._api_key,
@@ -189,16 +195,24 @@ class UpstoxDataService:
         }
         r = requests.post(_TOKEN_URL, data=payload, timeout=15)
         r.raise_for_status()
-        token = r.json().get("access_token", "")
+        try:
+            token = (r.json() or {}).get("access_token", "")
+        except ValueError:
+            token = ""
         if not token:
-            raise ValueError(f"No access_token in response: {r.text}")
+            raise ValueError(f"No access_token in Upstox response (HTTP {r.status_code})")
+        logger.info("Upstox access token obtained")
+        return token
+
+    def persist_global_token(self, token: str) -> None:
+        """Legacy single-user dev path: make `token` the process-wide token
+        (os.environ + backend/.env). Callers must only use this locally with
+        AUTH_MODE=bypass — never on a multi-user/serverless deploy."""
         self._token    = token
         self._token_ts = time.time()
         os.environ["UPSTOX_ACCESS_TOKEN"] = token
-        # Persist to .env so it survives restarts
-        _persist_token_to_env(token)
-        logger.info("Upstox access token obtained and stored")
-        return token
+        _persist_token_to_env(token)    # survives restarts
+        logger.info("Upstox access token stored globally (.env)")
 
     # ── Data fetching ────────────────────────────────────────────────────────
 
