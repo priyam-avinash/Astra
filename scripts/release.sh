@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage: scripts/release.sh patch|minor|major "Short description of the change"
 # Bumps VERSION, prepends a CHANGELOG entry, commits everything staged + the
-# version files, tags vX.Y.Z and pushes branch + tag.
+# version files, tags vX.Y.Z and pushes branch + tag (or a release/vX.Y.Z branch
+# where tag pushes are not allowed).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 part="${1:-patch}"; msg="${2:?describe the change}"
@@ -23,5 +24,9 @@ git -c user.name="${GIT_AUTHOR_NAME:-Priyam Avinash}" -c user.email="${GIT_AUTHO
 ${RELEASE_TRAILER:-}"
 git tag -a "v$NEW" -m "v$NEW: $msg"
 git push -q origin HEAD
-git push -q origin "v$NEW"
+# Version snapshot on GitHub: push the tag; if the remote refuses tags, publish a
+# release/vX.Y.Z branch at the same commit instead.
+if ! git push -q origin "v$NEW" 2>/dev/null; then
+  git push -q origin "HEAD:refs/heads/release/v$NEW"
+fi
 echo "released v$NEW"
