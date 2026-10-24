@@ -335,6 +335,11 @@ export default function App() {
         </nav>
 
         <div className="sidebar-footer">
+          {authMode?.version && isSidebarOpen && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '0 12px 8px' }}>
+              ASTRA v{authMode.version} · paper trading
+            </div>
+          )}
           <button className="nav-item" onClick={handleLogout}
             style={{ color: 'var(--red)', width: '100%', justifyContent: 'flex-start' }}>
             <LogOut size={16} />

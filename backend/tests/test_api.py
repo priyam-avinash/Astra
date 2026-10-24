@@ -15,7 +15,8 @@ def test_root_returns_status_ok(bypass_client):
 def test_health_returns_healthy(bypass_client):
     r = bypass_client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "healthy"}
+    assert r.json()["status"] == "healthy"
+    assert r.json()["mode"] == "PAPER" and r.json()["version"]
 
 
 def test_brokers_endpoint_lists_registered_brokers(bypass_client):

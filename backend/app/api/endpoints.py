@@ -171,7 +171,8 @@ def _registration_open(db: Session) -> bool:
 
 @router.get("/api/auth/mode")
 def auth_mode(db: Session = Depends(get_db)):
-    return {"mode": _AUTH_MODE, "registration_open": _registration_open(db)}
+    from app.core.config import APP_VERSION
+    return {"mode": _AUTH_MODE, "registration_open": _registration_open(db), "version": APP_VERSION}
 
 
 @router.post("/api/auth/register")

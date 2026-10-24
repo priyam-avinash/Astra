@@ -27,6 +27,17 @@ REPO_DIR = BACKEND_DIR.parent                           # …/ (repo root)
 # Serverless (Vercel): the code directory is read-only and there is no
 # long-running process, so writable state goes to /tmp and background
 # loops (Dhan feed, position monitor) are replaced by on-request work.
+def _read_version() -> str:
+    for p in (REPO_DIR / "VERSION", BACKEND_DIR / "VERSION"):
+        try:
+            return p.read_text().strip()
+        except Exception:
+            continue
+    return "dev"
+
+
+APP_VERSION = _read_version()
+
 SERVERLESS = bool(os.getenv("VERCEL") or os.getenv("ASTRA_SERVERLESS"))
 DATA_DIR = Path(os.getenv("ASTRA_DATA_DIR") or ("/tmp/astra-data" if SERVERLESS else BACKEND_DIR / "data"))
 

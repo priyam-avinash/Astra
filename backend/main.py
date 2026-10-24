@@ -106,7 +106,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ASTRA Trading API (Paper Trading)",
     description="AI research & paper-trading backend for Indian equities, crypto and commodities",
-    version="1.13.0",
+    version=__import__("app.core.config", fromlist=["APP_VERSION"]).APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -138,7 +138,8 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    from app.core.config import APP_VERSION
+    return {"status": "healthy", "version": APP_VERSION, "mode": "PAPER"}
 
 
 if __name__ == "__main__":
