@@ -32,7 +32,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
   const [predictions, setPredictions] = useState([]);
   const [scanNote, setScanNote]       = useState('');
   const [filterTab, setFilterTab]     = useState('All');
-  const [engine, setEngine]           = useState('astra'); // v1.13: Safe engine by default (AI engine is often all-HOLD in bear regimes)
+  const [engine, setEngine]           = useState('astra_ai'); // v1.14: ASTRA.AI v2 by default (ASTRA 1.0 lost money in backtests)
   const [pushingId, setPushingId]     = useState(null);
   const [pushError, setPushError]     = useState(null);
   const [loading, setLoading]         = useState(false);
@@ -127,7 +127,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
        .sort((a, b) => b.confidence - a.confidence);
       setPredictions(rows);
       const eqCount = rows.filter(r => r.type !== 'Commodity').length;
-      if (rows.length && !eqCount) setScanNote(`No stock setups from ${eq.universe_size || 0} stocks with this engine right now (macro filter / all HOLD). Try Astra 1.0.`);
+      if (rows.length && !eqCount) setScanNote(`No stock setups from ${eq.universe_size || 0} stocks with this engine right now — NIFTY is below its 200-day average, so the validated engine is in cash by design (it avoided most bear-market losses in backtests).`);
       if (!rows.length) setScanNote(`No BUY/SELL setups from ${eq.universe_size || 0} stocks right now. The model is holding, not failing.`);
     } catch (e) {
       setPushError(`Scan failed: ${e.message}. Is the backend running?`);
@@ -143,7 +143,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
         <div>
           <h2>AI Trading Signals</h2>
           <p style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>
-            Probability-weighted predictions using <strong>{engine === 'astra' ? 'Astra 1.0 (Safe)' : engine === 'astra_ai' ? 'Astra.ai 1.0 (Aggressive)' : 'Astra.ml (Deep)'}</strong>.
+            Probability-weighted predictions using <strong>{engine === 'astra' ? 'Astra 1.0 (Safe)' : engine === 'astra_ai' ? 'ASTRA.AI v2 (ranking model)' : 'ASTRA.ML (experimental)'}</strong>.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
@@ -157,8 +157,8 @@ export default function AIPredictionsView({ queue, setQueue }) {
               style={{ background: 'transparent', border: 'none', color: '#60a5fa', fontSize: '0.8rem', fontWeight: 700, outline: 'none', cursor: 'pointer' }}
             >
               <option value="astra">Astra 1.0 (Safe)</option>
-              <option value="astra_ai">Astra.ai 1.0 (Aggressive)</option>
-              <option value="astra_ml">Astra.ml (Deep ANN)</option>
+              <option value="astra_ai">ASTRA.AI v2 (ranking model)</option>
+              <option value="astra_ml">ASTRA.ML (experimental)</option>
             </select>
           </div>
 

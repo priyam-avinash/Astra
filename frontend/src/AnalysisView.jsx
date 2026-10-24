@@ -608,7 +608,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
           <div style={S.engineBar}>
             {['astra', 'astra_ai', 'astra_ml'].map(e => (
               <button key={e} style={S.engineTab(engine === e)} onClick={() => switchEngine(e)}>
-                {e === 'astra' ? 'ASTRA 1.0' : e === 'astra_ai' ? 'ASTRA.AI' : 'ASTRA.ML'}
+                {e === 'astra' ? 'ASTRA 1.0' : e === 'astra_ai' ? 'ASTRA.AI v2' : 'ASTRA.ML (exp.)'}
               </button>
             ))}
           </div>
@@ -663,6 +663,20 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
                     {data.data_freshness_note} Paper trading only.
                   </p>
                 </div>
+              </div>
+            )}
+
+            {/* ── ENGINE NOTE (v1.14) ── */}
+            {data.model_info && (
+              <div style={{ fontSize: 12, color: '#cbd5e1', background: 'rgba(99,102,241,.08)', border: '1px solid rgba(99,102,241,.3)', borderRadius: 8, padding: '8px 12px' }}>
+                <b>{data.model_info.model}</b>: ranked in the top {Math.max(0, 100 - data.model_info.rank_pct).toFixed(0)}% of 86 large caps today
+                {' '}(BUY needs the top 20% and NIFTY above its 200-day average{data.model_info.regime_bull ? '' : ' — currently below'}).
+                {' '}Exit plan: {data.model_info.sl_atr}×ATR stop, {data.model_info.tp_atr}×ATR target, max {data.model_info.max_hold_days} trading days.
+              </div>
+            )}
+            {engine === 'astra_ml' && (
+              <div style={{ fontSize: 12, color: '#fcd34d', background: 'rgba(245,158,11,.08)', border: '1px solid rgba(245,158,11,.3)', borderRadius: 8, padding: '8px 12px' }}>
+                ASTRA.ML is experimental: its neural network showed no edge on data it wasn't trained on. Prefer ASTRA.AI v2 or ASTRA 1.0 for decisions.
               </div>
             )}
 

@@ -32,6 +32,13 @@ async def list_all_strategies():
     return {"strategies": list_strategies()}
 
 
+@router.get("/backtests/summary")
+async def strategies_backtest_summary():
+    """Verified multi-year portfolio backtests for every engine (static, precomputed)."""
+    from app.strategies.registry import backtest_summary
+    return backtest_summary()
+
+
 @router.get("/{name}")
 async def get_strategy_detail(name: str):
     """Return detailed metadata for one strategy."""

@@ -113,6 +113,25 @@ function StrategyCard({ strategy, onBacktest, runningName, result }) {
           <div style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.55)', lineHeight: 1.45 }}>
             {strategy.description}
           </div>
+          {strategy.backtest && (
+            <div style={{ marginTop: 10, fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)' }}>
+              <div>
+                <b style={{ color: strategy.backtest.recommended ? '#22c55e' : '#ef4444' }}>
+                  {strategy.backtest.recommended ? 'Verified backtest' : 'Not recommended'}
+                </b>
+                {' '}· 2017–2026: {strategy.backtest.cagr_pct}%/yr · max drawdown {strategy.backtest.max_drawdown_pct}% · Sharpe {strategy.backtest.sharpe}
+                {strategy.backtest.verdict_note ? ` — ${strategy.backtest.verdict_note}` : ''}
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                {Object.entries(strategy.backtest.yearly_return_pct || {}).map(([y, v]) => (
+                  <span key={y} style={{ fontSize: '0.68rem', padding: '2px 6px', borderRadius: 4,
+                    background: v >= 0 ? 'rgba(34,197,94,.12)' : 'rgba(239,68,68,.12)', color: v >= 0 ? '#86efac' : '#fca5a5' }}>
+                    {y}: {v > 0 ? '+' : ''}{v}%
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ marginTop: '8px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
             {(strategy.tags || []).map(t => (
               <span key={t} style={{
@@ -223,6 +242,12 @@ export default function StrategiesView() {
   const [error, setError]             = useState('');
   const [runningName, setRunningName] = useState(null);
   const [results, setResults]         = useState({});  // {strategy_name → report}
+  const [summary, setSummary]         = useState(null);  // verified multi-year backtests
+  const [runError, setRunError]       = useState('');
+
+  useEffect(() => {
+    apiFetch('/strategies/backtests/summary').then(r => (r.ok ? r.json() : null)).then(setSummary).catch(() => {});
+  }, []);
 
   const fetchStrategies = useCallback(async () => {
     setLoading(true);
@@ -243,6 +268,7 @@ export default function StrategiesView() {
 
   const runBacktest = useCallback(async (name) => {
     setRunningName(name);
+    setRunError('');
     try {
       const r = await apiFetch(`/strategies/${encodeURIComponent(name)}/backtest`, { method: 'POST' });
       if (!r.ok) {
@@ -252,7 +278,7 @@ export default function StrategiesView() {
       const data = await r.json();
       setResults(prev => ({ ...prev, [name]: data }));
     } catch (e) {
-      alert(`Backtest failed for ${name}: ${e.message}`);
+      setRunError(`Backtest failed for ${name}: ${e.message}`);
     } finally {
       setRunningName(null);
     }
@@ -268,7 +294,7 @@ export default function StrategiesView() {
           <p style={{ color: 'rgba(255,255,255,0.5)', margin: '6px 0 0', fontSize: '0.9rem' }}>
             First-party ASTRA engines. Each runs through the same honest evaluator
             (walk-forward + cost stress + 8-quarter regime stability).
-            Pre-fetched data: 2 years daily, 86-stock universe.
+            “Run backtest” re-tests the last 2 years live; the verified multi-year results are shown on each card.
           </p>
         </div>
         <button onClick={fetchStrategies} disabled={loading} style={{
@@ -280,6 +306,18 @@ export default function StrategiesView() {
           <RefreshCw size={13} className={loading ? 'spin' : ''} /> Reload
         </button>
       </div>
+
+      {summary?.combined_rules_book && (
+        <div style={{ marginTop: 20, padding: 16, borderRadius: 12, background: 'rgba(34,197,94,.06)', border: '1px solid rgba(34,197,94,.25)', fontSize: '0.82rem', lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Verified backtests (paper) — what to expect</div>
+          <div><b>Recommended book</b> (STAGE2 + PULLBACK + MOMENTUM, equal capital): {summary.combined_rules_book.cagr_pct}%/yr 2017–2026,
+            max drawdown {summary.combined_rules_book.max_drawdown_pct}% · NIFTY 50: {summary.benchmarks?.NIFTY50?.cagr_pct}%/yr, max drawdown {summary.benchmarks?.NIFTY50?.max_drawdown_pct}%.</div>
+          {summary.astra_ai_v2 && <div><b>ASTRA.AI v2</b> — out-of-sample Jul 2024–Oct 2026: {summary.astra_ai_v2.test_2024_07_to_2026_10?.total_return_pct}% total
+            (NIFTY {summary.astra_ai_v2.nifty_same_window_pct}%, equal-weight universe {summary.astra_ai_v2.equal_weight_same_window_pct}% over the same window); walk-forward years: {Object.entries(summary.astra_ai_v2.walk_forward_years || {}).map(([y, v]) => `${y} ${v > 0 ? '+' : ''}${v}%`).join(' · ')}.</div>}
+          <div style={{ color: 'rgba(255,255,255,0.5)', marginTop: 6, fontSize: '0.74rem' }}>{summary.method}</div>
+        </div>
+      )}
+      {runError && <div role="alert" style={{ marginTop: 12, color: '#ef4444', fontSize: '0.85rem' }}>{runError}</div>}
 
       <div style={{ marginTop: '24px' }}>
         {loading && (

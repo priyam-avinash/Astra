@@ -71,9 +71,21 @@ def _discover_first_party() -> None:
     _DISCOVERED = True
 
 
+def backtest_summary() -> dict:
+    """Verified portfolio backtests (written by the research pipeline)."""
+    import json
+    from pathlib import Path
+    p = Path(__file__).with_name("backtest_summary.json")
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {}
+
+
 def list_strategies() -> list[dict]:
     """Public list — used by frontend strategy picker."""
     _discover_first_party()
+    bt = backtest_summary().get("strategies", {})
     out = []
     for name, cls in sorted(_REGISTRY.items()):
         try:
@@ -87,6 +99,7 @@ def list_strategies() -> list[dict]:
                 "long_only":   meta.long_only,
                 "owner":       meta.owner,
                 "tags":        meta.tags,
+                "backtest":    bt.get(meta.name),
             })
         except Exception as e:
             logger.warning(f"[registry] meta() failed for {name}: {e}")

@@ -123,7 +123,9 @@ def run_portfolio(trades: list, data: dict, start, end, max_pos: int = 10, seed:
 
     eq = pd.Series([e for _, e, _ in curve], index=[d for d, _, _ in curve])
     n_open = pd.Series([n for _, _, n in curve], index=eq.index)
-    return summarize(eq, n_open, taken, skipped, realised, max_pos)
+    out = summarize(eq, n_open, taken, skipped, realised, max_pos)
+    out["_curve"] = eq
+    return out
 
 
 def _mtm(p, closes, d) -> float:
@@ -190,6 +192,7 @@ def main():
     ap.add_argument("--end", default=None)
     ap.add_argument("--max-pos", type=int, default=10)
     ap.add_argument("--tag", default="full")
+    ap.add_argument("--combine", action="store_true", help="also report an equal-capital multi-strategy book")
     args = ap.parse_args()
     if not os.getenv("ASTRA_OFFLINE_DATA_DIR"):
         sys.exit("Set ASTRA_OFFLINE_DATA_DIR")
@@ -204,6 +207,7 @@ def main():
     report["_window"] = {"start": args.start, "end": args.end, "max_positions": args.max_pos,
                          "capital": CAPITAL, "models_dir": os.getenv("ASTRA_MODELS_DIR", "saved_models")}
     report["NIFTY50"] = benchmark_nifty(args.start, args.end)
+    curves = {}
     for name in args.strategies.split(","):
         t1 = time.time()
         strat = make_strategy(name)
@@ -211,9 +215,22 @@ def main():
         res = run_portfolio(trades, data, args.start, args.end, max_pos=args.max_pos)
         res["raw_trades"] = len(trades)
         res["seconds"] = round(time.time() - t1)
+        curves[name] = res.pop("_curve")
         report[name] = res
         print(name, json.dumps(res))
         out_path.write_text(json.dumps(report, indent=2, default=str))
+    if args.combine and len(curves) > 1:
+        # equal capital per sleeve, each sleeve runs its own book (rebalanced never)
+        df = pd.concat(curves, axis=1).ffill().dropna()
+        combo = (df / CAPITAL).mean(axis=1) * CAPITAL
+        res = summarize(combo, pd.Series(args.max_pos, index=combo.index), 0, 0, [], args.max_pos)
+        res = {k: res[k] for k in ("final_equity", "cagr_pct", "max_drawdown_pct", "sharpe", "yearly_return_pct",
+                                   "years_negative")}
+        res["sleeves"] = list(curves)
+        report["COMBINED"] = res
+        print("COMBINED", json.dumps(res))
+        out_path.write_text(json.dumps(report, indent=2, default=str))
+        pd.concat(curves, axis=1).to_csv(out_path.with_suffix(".curves.csv"))
     print(json.dumps(report["NIFTY50"]))
 
 
