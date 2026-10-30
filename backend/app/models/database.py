@@ -62,7 +62,7 @@ class TradeRecord(Base):
     asset = Column(String, index=True)
     action = Column(String)
     price = Column(Float)
-    quantity = Column(Integer)
+    quantity = Column(Float)   # fractional for crypto
     pnl = Column(Float, default=0.0)
     status = Column(String, default="Executed")
     timestamp = Column(DateTime, default=datetime.utcnow)
@@ -114,7 +114,7 @@ class ActivePosition(Base):
     asset = Column(String, index=True)
     direction = Column(String) # BUY or SELL
     entry_price = Column(Float)
-    quantity = Column(Integer)
+    quantity = Column(Float)   # fractional for crypto
     target_price = Column(Float, nullable=True)
     stop_loss = Column(Float, nullable=True)
     status = Column(String, default="OPEN") # OPEN, CLOSED
@@ -271,6 +271,16 @@ def _run_migrations():
                 conn.commit()
             except Exception:
                 conn.rollback()  # column already exists (SQLite) — safe to ignore
+
+    # v1.14.4 — fractional crypto quantities (SQLite stores REAL in INTEGER columns as-is)
+    if not IS_SQLITE:
+        with engine.connect() as conn:
+            for table in ("active_positions", "trade_history"):
+                try:
+                    conn.execute(_sql_text(f"ALTER TABLE {table} ALTER COLUMN quantity TYPE DOUBLE PRECISION"))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
 
 _run_migrations()
 

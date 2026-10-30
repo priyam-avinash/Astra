@@ -206,12 +206,23 @@ def _risk_guard(db: Session, user: User):
         raise HTTPException(status_code=429, detail=f"Daily loss limit (₹{MAX_DAILY_LOSS:,.0f}) reached. Trading paused for today.")
 
 
-def _validate_order(action: str, quantity, price) -> str:
+def _validate_order(action: str, quantity, price, asset: str = "") -> str:
+    """Equities trade in whole shares; crypto allows fractional units (≥ 0.000001)."""
+    from app.services.market_data import asset_class
     a = (action or "").upper().strip()
     if a not in ("BUY", "SELL"):
         raise HTTPException(status_code=400, detail="Action must be BUY or SELL.")
-    if quantity is None or quantity < 1 or quantity > 1_000_000:
-        raise HTTPException(status_code=400, detail="Quantity must be between 1 and 1,000,000.")
+    try:
+        crypto = bool(asset) and asset_class(asset) == "crypto"
+    except Exception:
+        crypto = False
+    if quantity is None or quantity != quantity or quantity > 1_000_000:
+        raise HTTPException(status_code=400, detail="Quantity must be at most 1,000,000.")
+    if crypto:
+        if quantity < 1e-6:
+            raise HTTPException(status_code=400, detail="Quantity must be at least 0.000001.")
+    elif quantity < 1 or float(quantity) != int(quantity):
+        raise HTTPException(status_code=400, detail="Stock quantity must be a whole number of shares (1 – 1,000,000).")
     if price is None or not (price > 0) or price != price or price == float("inf"):
         raise HTTPException(status_code=400, detail="Price must be a positive number.")
     return a
@@ -312,7 +323,7 @@ class TradeAction(BaseModel):
     id: int # Queue signal ID
     asset: str
     action: str
-    quantity: int
+    quantity: float
     price: float
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
@@ -672,7 +683,7 @@ def push_ai_signal(signal: SignalPayload, db: Session = Depends(get_db), current
 def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Approve a queued signal → paper position. A signal can be executed once."""
     from datetime import timedelta
-    action = _validate_order(trade.action, trade.quantity, trade.price)
+    action = _validate_order(trade.action, trade.quantity, trade.price, trade.asset)
     _risk_guard(db, current_user)
 
     signal = db.query(TargetSignal).filter(TargetSignal.id == trade.id, TargetSignal.user_id == current_user.id).first()
@@ -738,14 +749,14 @@ def execute_trade(trade: TradeAction, db: Session = Depends(get_db), current_use
 class ManualTradeAction(BaseModel):
     asset: str
     action: str
-    quantity: int
+    quantity: float
     price: float
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
 
 @router.post("/api/execute/manual")
 def execute_manual_trade(trade: ManualTradeAction, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    action = _validate_order(trade.action, trade.quantity, trade.price)
+    action = _validate_order(trade.action, trade.quantity, trade.price, trade.asset)
     _risk_guard(db, current_user)
     try:
         result = broker_service.execute_trade(asset=trade.asset, action=action,

@@ -75,7 +75,7 @@ export default function ManualTradeView() {
         body: JSON.stringify({
           asset: asset.toUpperCase(),
           action,
-          quantity: parseInt(quantity),
+          quantity: /-(USD|INR)$/i.test(asset.trim()) ? parseFloat(quantity) : parseInt(quantity),
           price: parseFloat(price),
           target_price: targetPrice ? parseFloat(targetPrice) : null,
           stop_loss: stopLoss ? parseFloat(stopLoss) : null
@@ -127,7 +127,7 @@ export default function ManualTradeView() {
               </div>
               <div className="input-group">
                 <label>QTY</label>
-                <input type="number" value={quantity} onChange={e=>setQuantity(e.target.value)} style={{ width: '100%', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', color: 'white', padding: '12px', borderRadius: '8px' }}/>
+                <input type="number" value={quantity} step={/-(USD|INR)$/i.test(asset.trim()) ? "any" : "1"} onChange={e=>setQuantity(e.target.value)} style={{ width: '100%', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', color: 'white', padding: '12px', borderRadius: '8px' }}/>
               </div>
             </div>
 

@@ -163,3 +163,15 @@ def test_no_fill_on_stale_price(client, monkeypatch):
     r = client.post("/api/execute/manual", json={"asset": "STALECO.NS", "action": "BUY", "quantity": 1, "price": 1200})
     assert r.status_code == 503 and "No live price" in r.json()["detail"]
     assert "STALECO.NS" not in [p["asset"] for p in client.get("/api/positions").json()["positions"]]
+
+
+def test_fractional_quantity_rules():
+    from fastapi import HTTPException
+    from app.api.endpoints import _validate_order
+    assert _validate_order("buy", 0.0025, 60000.0, "BTC-USD") == "BUY"
+    for q, sym in ((0.5, "TCS.NS"), (0, "TCS.NS"), (1e-9, "BTC-USD"), (2_000_000, "TCS.NS")):
+        try:
+            _validate_order("BUY", q, 100.0, sym)
+            raise AssertionError((q, sym))
+        except HTTPException as e:
+            assert e.status_code == 400

@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.4 — 2026-10-30
+- Fractional crypto quantities (e.g. 0.0025 BTC) for paper orders and positions; stocks still trade in whole shares; Postgres column migrated
+
 ## 1.14.3 — 2026-10-30
 - Live prices: WebSocket sends the login token (required since the WebSocket auth fix), quote polling goes through the authenticated fetch helper
 

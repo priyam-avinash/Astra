@@ -85,7 +85,7 @@ class PaperTradingEngine:
             logger.warning(f"Exit price fetch failed for {asset}: {e}")
         return 0.0
 
-    def execute_trade(self, asset: str, action: str, quantity: int, price: float) -> dict:
+    def execute_trade(self, asset: str, action: str, quantity: float, price: float) -> dict:
         """Place a paper order. Returns order dict with executed_price from real LTP."""
         if quantity <= 0 or quantity > 1_000_000:
             raise ValueError(f"Invalid quantity {quantity} for {asset}")
