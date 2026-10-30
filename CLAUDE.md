@@ -68,16 +68,25 @@ python -c "from app.services.ai_predictor import ai_engine; print(ai_engine.anal
 
 ## Architecture
 
-### Three Prediction Engines (all in `backend/app/services/ai_predictor.py`)
+### Engines and strategies (v1.14)
 
-| Engine | Selector (`engine=`) | File | Description |
-|--------|---------------------|------|-------------|
-| ASTRA 1.0 | `astra` | `ai_predictor.py` | Rule-based 4/6 multi-confirmation system |
-| ASTRA.AI | `astra_ai` | `ai_predictor.py` | Random Forest, 20 features, 5-day return target |
-| ASTRA.ML | `astra_ml` | `ai_predictor.py` | Bidirectional LSTM (lookback=30), 3-day return target |
-| ASTRA.CRYPTO | `astra_crypto` | `crypto_engine.py` | Regime-aware rules (Donchian/BB) + 3-class BiLSTM direction classifier |
+| Engine | Selector | Where | Status (verified backtests in `app/strategies/backtest_summary.json`) |
+|--------|----------|-------|------|
+| ASTRA.AI v2 | `astra_ai` | `services/ai_v2.py` | Default. Universe-ranking ExtraTrees (numpy forest, `saved_models/astra_ai_v2.json`); BUY = top-20% score + NIFTY > 200DMA |
+| ASTRA 1.0 | `astra` | `ai_predictor.py` (`ASTRA1` config) | Rule engine (7 confirmations); not recommended |
+| ASTRA.ML | `astra_ml` | `ai_predictor.py` | BiLSTM, experimental — no out-of-sample skill |
+| ASTRA.CRYPTO | `astra_crypto` | `crypto_engine.py` | Regime rules (Donchian / BB) |
+| Rule strategies | — | `app/strategies/` | STAGE2, PULLBACK, MOMENTUM, QUALITY (registry + evaluator) |
+| Intraday | — | `intraday_engine.py`, `intraday_backtest.py` | Experimental: no edge after costs |
 
-All engines share `_compute_features()` (20 features: SMA distances, RSI, MACD, ADX, Stochastic, BB, Donchian, Volume, OBV, Candlestick geometry). Inference always uses `analyze_market_data(symbol, engine=...)` which returns `{signal, confidence, entry_price, target, stop_loss, chartData}`.
+Live analysis and backtests share `ai_engine.decide()` (`strategies/ai_wrappers.py`), so backtests use the live logic.
+
+### Research and versioning
+- Offline data: `ASTRA_OFFLINE_DATA_DIR=<dir of SYMBOL__1d.csv / __15m.csv>` makes `market_data` read CSVs only (export with `POST /api/data/export` locally). `ASTRA_OFFLINE_ASOF` truncates for hold-out tests.
+- `backend/research/`: `features_v2`, triple-barrier labels, `simulate.py` (next-open entries, gap-aware stops, 0.25% + 0.05% costs), walk-forward, `tune_rules.py`, `tune_crypto.py`, `tune_astra1.py`. Select window 2017-06 → 2024-04; test window 2024-07 → is never used for choosing.
+- Intraday backtest is look-ahead free (next-bar-open entries, stop before target, trail from next bar, 15:15 open square-off); universe backtests keep signal weights frozen.
+- Every change ships as a version: `RELEASE_TRAILER=... scripts/release.sh patch "msg"` bumps `VERSION`, updates `CHANGELOG.md`, pushes the branch and a `release/vX.Y.Z` branch (tags are blocked by the proxy).
+- Mutual funds (`services/mutual_funds.py`, mfapi.in): paper orders priced at the order date's NAV (PENDING until published, cancelled after 10 days), SIPs booked lazily with an atomic claim.
 
 ### Data Flow (v1.13)
 ```
@@ -107,7 +116,7 @@ AI Analysis → TargetSignal (DB, status="Pending Approval")
 ```
 
 ### Database (SQLAlchemy ORM — `backend/app/models/database.py`)
-Four tables: `users`, `active_signals` (TargetSignal), `active_positions` (ActivePosition), `trade_history` (TradeRecord). Local dev uses SQLite auto-created at startup. Docker uses PostgreSQL.
+Core tables: `users`, `active_signals` (TargetSignal), `active_positions` (ActivePosition), `trade_history` (TradeRecord), `app_settings`, plus `mf_holdings` / `mf_transactions` / `mf_sips`. Quantities are floats (crypto can be fractional; stocks are validated as whole shares). Columns are added by `_run_migrations()`. Local dev uses SQLite auto-created at startup. Docker uses PostgreSQL.
 
 ### Celery (`backend/app/services/tasks.py`)
 - `analyze_asset` — on-demand async analysis task
