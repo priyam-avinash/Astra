@@ -149,3 +149,26 @@ def test_canonical_scheme_codes():
     for bad in ("²", "١٢", "12a", "", "123456789"):
         with pytest.raises(MFError):
             canon_code(bad)
+
+
+def test_unpriced_fund_rejects_orders_and_pending_orders_expire(svc, jwt_client, random_username):
+    from app.services import mutual_funds as mf
+    c = jwt_client
+    c.post("/api/auth/register", json={"username": random_username, "password": "pw_test_123"})
+    tok = c.post("/api/auth/token", data={"username": random_username, "password": "pw_test_123"}).json()["access_token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    # a fund whose NAV stopped 30 days ago doesn't take new orders
+    svc._payloads["120503"] = _fake_payload(end=date.today() - timedelta(days=30))
+    svc._nav_cache.clear()
+    r = c.post("/api/mf/invest", json={"scheme_code": "120503", "amount": 10000}, headers=h)
+    assert r.status_code == 400 and "NAV" in r.json()["detail"]
+    # a pending order placed 12 days ago that never got a NAV is cancelled
+    svc._payloads["120503"] = _fake_payload(end=date.today() - timedelta(days=13))
+    svc._nav_cache.clear()
+    from app.models.database import SessionLocal, User
+    db = SessionLocal()
+    uid = db.query(User).filter(User.username == random_username).first().id
+    tx = mf.book_purchase(db, uid, "120503", 5000, on=date.today() - timedelta(days=12))
+    db.commit()
+    assert tx.status == "CANCELLED"
+    db.close()

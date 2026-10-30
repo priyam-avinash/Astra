@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.6 — 2026-10-30
+- Mutual funds: funds with no NAV for over 7 days (closed or merged) don't accept orders; pending orders that get no NAV within 10 days are cancelled and reserved units returned; a NAV that only appears long after the order date is not used
+
 ## 1.14.5 — 2026-10-30
 - ASTRA.AI v2: stocks whose last bar trails the freshest bar by more than 4 days (suspended, feed gap, stale cache) are no longer ranked as if their old prices were today's
 

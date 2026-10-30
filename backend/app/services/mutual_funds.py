@@ -283,10 +283,39 @@ def _holding(db, user_id: int, code: str, name: str):
     return h
 
 
+MAX_NAV_LAG_DAYS = 7      # a fund whose latest NAV is older than this isn't accepting orders
+PENDING_EXPIRY_DAYS = 10  # a pending order with no NAV after this many days is cancelled
+
+
+def _check_priced(s: pd.Series):
+    lag = (pd.Timestamp(_today()) - s.index[-1]).days
+    if lag > MAX_NAV_LAG_DAYS:
+        raise MFError(f"This fund hasn't published a NAV for {lag} days (closed or merged?) — "
+                      "it isn't accepting orders")
+
+
+def _cancel(db, tx, reason: str):
+    """Expire an order that can't be priced; a redemption's reserved units go back."""
+    if tx.kind == "SELL" and tx.units:
+        h = _holding(db, tx.user_id, tx.scheme_code, tx.scheme_name)
+        h.units = round((h.units or 0) + tx.units, 4)
+        h.invested = round((h.invested or 0) + (tx.cost_basis or 0.0), 2)
+    tx.status = "CANCELLED"
+    logger.info(f"[mf] order {tx.id} cancelled: {reason}")
+
+
 def _settle(db, tx, s: pd.Series) -> bool:
-    """Price a PENDING transaction once the NAV for its order date is out."""
+    """Price a PENDING transaction once the NAV for its order date is out.
+    A NAV that only appears long after the order date (data gap) is not used."""
     nd, nav = MutualFundService.nav_for_order(s, tx.order_date)
+    od = pd.Timestamp(tx.order_date)
+    if nav is not None and (nd - od).days > MAX_NAV_LAG_DAYS:
+        _cancel(db, tx, f"first NAV after the order date is {nd.date()}")
+        return True
     if nav is None:
+        if (pd.Timestamp(_today()) - od).days > PENDING_EXPIRY_DAYS:
+            _cancel(db, tx, "no NAV published")
+            return True
         return False
     h = _holding(db, tx.user_id, tx.scheme_code, tx.scheme_name)
     if tx.kind in ("BUY", "SIP"):
@@ -310,6 +339,8 @@ def book_purchase(db, user_id: int, code: str, amount: float, kind: str = "BUY",
     if amount > 1e8:
         raise MFError("Amount too large for a paper investment")
     meta, s = mf_service.nav_history(code)
+    if on is None:
+        _check_priced(s)
     d = on or _today()
     if pd.Timestamp(d) < s.index[0]:
         raise MFError("The fund didn't exist on that date")
@@ -330,6 +361,7 @@ def book_redemption(db, user_id: int, code: str, units: Optional[float] = None,
     if h is None or (h.units or 0) <= 0:
         raise MFError("You don't hold this fund")
     meta, s = mf_service.nav_history(code)
+    _check_priced(s)
     if units is None:
         if amount is None or amount <= 0:
             raise MFError("Give units or an amount to redeem")
