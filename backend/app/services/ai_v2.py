@@ -31,6 +31,9 @@ MODELS_DIR = Path(__file__).resolve().parents[1] / "models" / "saved_models"
 SNAPSHOT_TTL_SEC = 30 * 60
 
 
+MAX_BAR_LAG_DAYS = 4      # calendar days a stock's last bar may trail the freshest one
+
+
 class AIv2:
     def __init__(self, models_dir: Path = MODELS_DIR):
         self.models_dir = Path(models_dir)
@@ -98,9 +101,14 @@ class AIv2:
             ds = pd.concat(rows)
             ds.index.name = "date"
             ds = ds.reset_index()
-            # stocks whose last bar is older than the freshest bar are scored but not ranked against today
-            ds["date"] = ds["date"].max()
-            ds = add_cross_sectional(ds)
+            # A stock whose last bar lags the freshest bar (suspended, feed gap, stale cache)
+            # would be ranked on old prices as if they were today's: leave it unscored.
+            bar = pd.to_datetime(ds["date"])
+            bar = bar.dt.tz_localize(None) if bar.dt.tz is not None else bar
+            ds["bar_date"] = bar.dt.strftime("%Y-%m-%d")
+            fresh = (bar.max() - bar) <= pd.Timedelta(days=MAX_BAR_LAG_DAYS)
+            ds["date"] = bar.max()
+            ds = add_cross_sectional(ds[fresh].reset_index(drop=True))
             feats = feature_columns()
             ok = ds[feats].notna().all(axis=1)
             ds["score"] = np.nan
@@ -108,7 +116,8 @@ class AIv2:
                 ds.loc[ok, "score"] = self.model.predict(ds.loc[ok, feats].values)
             ds["pct"] = ds["score"].rank(pct=True)
             self._snap, self._snap_at = ds.set_index("symbol"), time.time()
-            logger.info(f"[v2] snapshot built: {int(ok.sum())}/{len(ds)} stocks scored")
+            logger.info(f"[v2] snapshot built: {int(ok.sum())}/{len(rows)} stocks scored "
+                        f"({len(rows) - len(ds)} dropped for stale bars)")
             return self._snap
 
     # ── decisions ────────────────────────────────────────────────────────

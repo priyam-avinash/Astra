@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.5 — 2026-10-30
+- ASTRA.AI v2: stocks whose last bar trails the freshest bar by more than 4 days (suspended, feed gap, stale cache) are no longer ranked as if their old prices were today's
+
 ## 1.14.4 — 2026-10-30
 - Fractional crypto quantities (e.g. 0.0025 BTC) for paper orders and positions; stocks still trade in whole shares; Postgres column migrated
 
