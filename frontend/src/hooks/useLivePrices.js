@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { WS_URL as WS_ORIGIN, API_URL } from '../config';
+import { apiFetch, getToken } from '../auth';
 
 const WS_URL = `${WS_ORIGIN}/ws/prices`;
 const RECONNECT_DELAY_MS = 5000;
@@ -24,7 +25,7 @@ export default function useLivePrices() {
     const syms = [...symbolsRef.current];
     await Promise.all(syms.map(async (sym) => {
       try {
-        const r = await fetch(`${API_URL}/api/quote/${encodeURIComponent(sym)}`);
+        const r = await apiFetch(`${API_URL}/api/quote/${encodeURIComponent(sym)}`);
         if (!r.ok) return;
         const q = await r.json();
         if (!mountedRef.current || !(q.price > 0)) return;
@@ -49,7 +50,8 @@ export default function useLivePrices() {
     if (WS_DISABLED || failedRef.current >= MAX_FAILED_CONNECTS) { startPolling(); return; }
 
     try {
-      const ws = new WebSocket(WS_URL);
+      const tok = getToken();
+      const ws = new WebSocket(tok ? `${WS_URL}?token=${encodeURIComponent(tok)}` : WS_URL);
       wsRef.current = ws;
 
       ws.onopen = () => {

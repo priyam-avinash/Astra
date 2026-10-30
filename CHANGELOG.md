@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.3 — 2026-10-30
+- Live prices: WebSocket sends the login token (required since the WebSocket auth fix), quote polling goes through the authenticated fetch helper
+
 ## 1.14.2 — 2026-10-30
 - Intraday backtest made look-ahead free: next-bar-open entries, stop checked before target with gap-aware fills, trailing stop applies from the next bar, square-off at the 15:15 open, trend filter and ORB volume use only past bars, daily-reset VWAP (live + backtest), Combined picks the earliest signal, universe backtest no longer learns from its own test; result: no intraday strategy has an edge after costs (about -0.25% per trade), flagged experimental in the UI
 
