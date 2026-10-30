@@ -206,24 +206,24 @@
     }
    },
    "altcoin": {
-    "cagr_pct": 22.6,
-    "total_return_pct": 501.4,
-    "max_dd_pct": -68.9,
-    "sharpe": 0.55,
-    "exposure_pct": 44.1,
-    "trades": 365,
-    "win_rate_pct": 43.3,
-    "avg_trade_pct": 3.5,
+    "cagr_pct": 54.0,
+    "total_return_pct": 3630.4,
+    "max_dd_pct": -46.8,
+    "sharpe": 1.02,
+    "exposure_pct": 27.3,
+    "trades": 387,
+    "win_rate_pct": 54.0,
+    "avg_trade_pct": 5.96,
     "yearly_pct": {
-     "2018": -32.1,
-     "2019": -24.2,
-     "2020": 119.2,
-     "2021": 724.6,
-     "2022": -57.2,
-     "2023": 148.0,
-     "2024": 26.1,
-     "2025": -51.5,
-     "2026": -0.4
+     "2018": 0.0,
+     "2019": -5.8,
+     "2020": 85.2,
+     "2021": 834.4,
+     "2022": -9.3,
+     "2023": 98.6,
+     "2024": 98.5,
+     "2025": -40.4,
+     "2026": 7.4
     }
    },
    "BTC_buy_hold": {
@@ -265,18 +265,18 @@
     }
    },
    "altcoin": {
-    "cagr_pct": -13.4,
-    "total_return_pct": -28.0,
-    "max_dd_pct": -68.9,
-    "sharpe": -0.07,
-    "exposure_pct": 52.5,
-    "trades": 113,
-    "win_rate_pct": 39.8,
-    "avg_trade_pct": -0.13,
+    "cagr_pct": 0.6,
+    "total_return_pct": 1.4,
+    "max_dd_pct": -46.8,
+    "sharpe": 0.17,
+    "exposure_pct": 30.0,
+    "trades": 120,
+    "win_rate_pct": 45.8,
+    "avg_trade_pct": 1.01,
     "yearly_pct": {
-     "2024": 48.9,
-     "2025": -51.5,
-     "2026": -0.4
+     "2024": 58.5,
+     "2025": -40.4,
+     "2026": 7.4
     }
    },
    "BTC_buy_hold": {
@@ -294,7 +294,8 @@
      "2026": -6.5
     }
    }
-  }
+  },
+  "altcoin_note": "v1.14.8: altcoins trade breakouts only, and only while BTC is above its 200-day average (stop 3\u00d7ATR, target 4.5\u00d7ATR, 20-day limit). Chosen on 2018\u20132024; untouched Jul 2024\u2013Oct 2026 test: +0.6%/yr, drawdown \u221247% (old rules \u221210.3%/yr, \u221270%). Full-period figures are partly in-sample; 2021 dominates."
  },
  "benchmarks": {
   "NIFTY50": {

@@ -54,10 +54,15 @@ INDIAN_CRYPTO = {
 }
 
 # ATR multipliers by risk class
+# mode: "regime_switch" = breakout when ADX ≥ 25, mean reversion otherwise;
+#       "momentum_only" = breakouts only, and only while BTC is above its 200-day average.
+# v1.14.8: altcoins/memes tuned on 2018–2024 (kept because the untouched Jul 2024–Oct 2026
+# test improved from −10.3%/yr, −70% drawdown to +0.6%/yr, −47% drawdown). Majors: the
+# tuned variant did worse on the test, so they keep the regime switch.
 RISK_CONFIG = {
-    "major":   {"sl_mult": 2.0, "tp_mult": 4.5, "conf_threshold": 0.8},
-    "altcoin": {"sl_mult": 2.8, "tp_mult": 5.5, "conf_threshold": 0.85},
-    "meme":    {"sl_mult": 3.5, "tp_mult": 7.0, "conf_threshold": 0.90},
+    "major":   {"sl_mult": 2.0, "tp_mult": 4.5, "conf_threshold": 0.8,  "mode": "regime_switch", "max_hold_days": 40},
+    "altcoin": {"sl_mult": 3.0, "tp_mult": 4.5, "conf_threshold": 0.85, "mode": "momentum_only", "max_hold_days": 20},
+    "meme":    {"sl_mult": 3.0, "tp_mult": 4.5, "conf_threshold": 0.90, "mode": "momentum_only", "max_hold_days": 20},
 }
 
 # Feature columns for crypto LSTM (20 features — overlapping with equity but crypto-specific)
@@ -157,6 +162,23 @@ class CryptoEngine:
             self.fear_greed_cache = {"value": 50, "label": "Neutral (unavailable)", "updated": ""}
             self.fear_greed_updated = now - timedelta(seconds=3000)
             return self.fear_greed_cache
+
+    def btc_above_200dma(self) -> bool:
+        """BTC-USD daily close above its 200-day average (cached 1h). True when unknown."""
+        now = datetime.now()
+        cache = getattr(self, "_btc200_cache", None)
+        if cache and (now - cache[1]).total_seconds() < 3600:
+            return cache[0]
+        val = True
+        try:
+            from app.services.market_data import market_data
+            c = market_data.get_ohlcv("BTC-USD", period="2y", interval="1d")["Close"]
+            if len(c) >= 200:
+                val = bool(c.iloc[-1] > c.rolling(200).mean().iloc[-1])
+        except Exception as e:
+            logger.debug(f"BTC 200DMA check failed: {e}")
+        self._btc200_cache = (val, now)
+        return val
 
     def get_btc_dominance(self) -> float:
         """
@@ -425,7 +447,16 @@ class CryptoEngine:
             strategy_used = "neutral"
             checks = {}
 
-            if engine == "astra_crypto":
+            if engine == "astra_crypto" and risk_cfg.get("mode") == "momentum_only":
+                if not self.btc_above_200dma():
+                    checks = {"btc_above_200dma": False}
+                    strategy_used = "btc_regime_off"
+                elif is_trending:
+                    signal, confidence, checks = self._strategy_momentum_breakout(last)
+                    strategy_used = "momentum_breakout"
+                else:
+                    strategy_used = "no_trend"
+            elif engine == "astra_crypto":
                 if is_trending:
                     signal, confidence, checks = self._strategy_momentum_breakout(last)
                     strategy_used = "momentum_breakout"
@@ -521,6 +552,7 @@ class CryptoEngine:
                 "market": market,
                 "currency": currency,
                 "risk_class": risk_class,
+                "max_hold_days": risk_cfg.get("max_hold_days"),
                 "signal": signal,
                 "confidence": round(confidence, 1),
                 "current_price": entry_p,
