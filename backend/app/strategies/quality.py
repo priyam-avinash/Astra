@@ -35,13 +35,13 @@ from app.strategies.filters import passes_enhancement_filters
 # ── Parameters ────────────────────────────────────────────────────────────
 LOOKBACK_DAYS         = 252
 RISK_FREE_ANNUAL      = 0.07
-TOP_PCT_ENTRY         = 0.20              # widened from 0.10
+TOP_PCT_ENTRY         = 0.10              # v1.14.7 tuned: top decile only
 TOP_PCT_EXIT          = 0.30              # widened from 0.25
 SMA_TREND             = 200
 
 ADX_MAX_THRESHOLD     = 35               # exclude high-ADX volatile names
-ATR_STOP_MULT         = 2.0
-TARGET_ATR_MULT       = 3.0
+ATR_STOP_MULT         = 3.0               # v1.14.7 tuned
+TARGET_ATR_MULT       = 6.0               # v1.14.7 tuned
 SUPERTREND_PERIOD     = 10
 SUPERTREND_MULT       = 3.0
 

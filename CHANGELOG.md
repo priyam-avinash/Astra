@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.7 — 2026-10-30
+- Tuned rule strategies (chosen on 2017-2024, kept only where the untouched 2024-2026 test also improved): STAGE2 12.0 -> 15.4%/yr, PULLBACK 7.9 -> 10.2%/yr, QUALITY -3.1 -> +1.0%/yr; MOMENTUM unchanged (tuning hurt the test); recommended book is now STAGE2 + PULLBACK: 13.1%/yr, max drawdown -16.7% vs NIFTY 9.8%/yr, -38.4%
+
 ## 1.14.6 — 2026-10-30
 - Mutual funds: funds with no NAV for over 7 days (closed or merged) don't accept orders; pending orders that get no NAV within 10 days are cancelled and reserved units returned; a NAV that only appears long after the order date is not used
 

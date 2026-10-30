@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-24",
+ "generated": "2026-10-30",
  "method": "Daily bars, next-day-open entries, gap-aware stops, NSE delivery costs (0.25% + 0.05% slippage/side), \u20b910L capital, max 10 positions, 86-stock large-cap universe (today's members: survivorship bias). Rule engines: Jun 2017\u2013Oct 2026. ASTRA.AI v2: walk-forward (each year scored by a model trained only on earlier data) and an untouched out-of-sample test Jul 2024\u2013Oct 2026. Past results don't guarantee future returns.",
  "strategies": {
   "ASTRA.1.0": {
@@ -26,26 +26,27 @@
    "verdict_note": "Lost money over 2017\u20132026 \u2014 not recommended"
   },
   "ASTRA.PULLBACK": {
-   "cagr_pct": 7.9,
-   "max_drawdown_pct": -16.2,
-   "sharpe": 0.87,
+   "cagr_pct": 10.2,
+   "max_drawdown_pct": -14.7,
+   "sharpe": 1.02,
    "yearly_return_pct": {
-    "2017": 11.6,
-    "2018": 7.9,
-    "2019": 1.5,
-    "2020": 24.0,
-    "2021": 17.3,
-    "2022": -8.6,
-    "2023": 24.3,
-    "2024": 7.0,
-    "2025": -3.7,
-    "2026": -2.3
+    "2017": 15.3,
+    "2018": 10.0,
+    "2019": 1.2,
+    "2020": 30.2,
+    "2021": 16.6,
+    "2022": -8.5,
+    "2023": 30.7,
+    "2024": 14.8,
+    "2025": -0.8,
+    "2026": -6.4
    },
-   "win_rate_pct": 43.8,
-   "avg_trade_net_pct": 1.26,
-   "trades_taken": 598,
-   "avg_exposure_pct": 45.2,
-   "recommended": true
+   "win_rate_pct": 43.0,
+   "avg_trade_net_pct": 1.64,
+   "trades_taken": 619,
+   "avg_exposure_pct": 55.0,
+   "recommended": true,
+   "tuning_note": "v1.14.7: target 6\u00d7ATR, sector filter off. Untouched test: \u22122.3% vs \u22123.3%/yr, drawdown \u221210.9% vs \u221214.8%."
   },
   "ASTRA.MOMENTUM": {
    "cagr_pct": 7.2,
@@ -67,77 +68,80 @@
    "avg_trade_net_pct": 1.61,
    "trades_taken": 454,
    "avg_exposure_pct": 47.5,
-   "recommended": true
+   "recommended": true,
+   "tuning_note": "Tuning improved 2017\u20132024 but made the untouched test worse (\u221210.5% vs \u22126.9%/yr), so the settings were left unchanged."
   },
   "ASTRA.STAGE2": {
-   "cagr_pct": 12.0,
-   "max_drawdown_pct": -21.7,
-   "sharpe": 0.91,
+   "cagr_pct": 15.4,
+   "max_drawdown_pct": -21.3,
+   "sharpe": 1.13,
    "yearly_return_pct": {
-    "2017": 3.4,
-    "2018": -5.6,
-    "2019": 0.8,
-    "2020": 42.5,
-    "2021": 52.0,
-    "2022": -10.7,
-    "2023": 45.6,
-    "2024": 8.3,
-    "2025": 4.9,
-    "2026": -8.4
+    "2017": 2.5,
+    "2018": -0.1,
+    "2019": 9.1,
+    "2020": 36.3,
+    "2021": 53.4,
+    "2022": -3.4,
+    "2023": 54.4,
+    "2024": 10.1,
+    "2025": 10.1,
+    "2026": -9.1
    },
-   "win_rate_pct": 41.4,
-   "avg_trade_net_pct": 1.46,
-   "trades_taken": 851,
-   "avg_exposure_pct": 66.2,
-   "recommended": true
+   "win_rate_pct": 41.3,
+   "avg_trade_net_pct": 2.04,
+   "trades_taken": 796,
+   "avg_exposure_pct": 68.6,
+   "recommended": true,
+   "tuning_note": "v1.14.7: 52-week-high proximity 90%, 80-day time stop. Chosen on 2017\u20132024 data; on the untouched Jul 2024\u2013Oct 2026 test it beat the old settings (+1.8% vs \u22121.6%/yr at 8 positions). Full-period figures are partly in-sample."
   },
   "ASTRA.QUALITY": {
-   "cagr_pct": -3.1,
-   "max_drawdown_pct": -32.5,
-   "sharpe": -0.28,
+   "cagr_pct": 1.0,
+   "max_drawdown_pct": -17.7,
+   "sharpe": 0.17,
    "yearly_return_pct": {
-    "2017": -1.0,
-    "2018": -16.2,
-    "2019": 0.7,
-    "2020": 13.5,
-    "2021": -2.0,
-    "2022": -7.1,
-    "2023": 6.0,
-    "2024": -4.3,
-    "2025": -11.7,
-    "2026": -4.2
+    "2017": -1.1,
+    "2018": -6.2,
+    "2019": -1.2,
+    "2020": 11.6,
+    "2021": 7.8,
+    "2022": -3.8,
+    "2023": 9.0,
+    "2024": 1.6,
+    "2025": -5.9,
+    "2026": -0.6
    },
-   "win_rate_pct": 41.1,
-   "avg_trade_net_pct": -0.11,
-   "trades_taken": 2252,
-   "avg_exposure_pct": 30.4,
+   "win_rate_pct": 38.6,
+   "avg_trade_net_pct": 0.16,
+   "trades_taken": 799,
+   "avg_exposure_pct": 15.9,
    "recommended": false,
-   "verdict_note": "Lost money over 2017\u20132026 \u2014 not recommended"
+   "verdict_note": "Lost money over 2017\u20132026 \u2014 not recommended",
+   "tuning_note": "v1.14.7: top decile only, 3\u00d7ATR stop, 6\u00d7ATR target. Untouched test: \u22122.3% vs \u221211.3%/yr. Still weak \u2014 not recommended."
   }
  },
  "combined_rules_book": {
-  "final_equity": 2277404,
-  "cagr_pct": 9.2,
-  "max_drawdown_pct": -14.8,
-  "sharpe": 0.92,
+  "final_equity": 3161097,
+  "cagr_pct": 13.1,
+  "max_drawdown_pct": -16.7,
+  "sharpe": 1.18,
   "yearly_return_pct": {
-   "2017": 6.2,
-   "2018": -2.7,
-   "2019": 0.3,
-   "2020": 30.6,
-   "2021": 28.6,
-   "2022": -6.4,
-   "2023": 35.5,
-   "2024": 10.8,
-   "2025": -0.7,
-   "2026": -6.2
+   "2017": 8.9,
+   "2018": 5.3,
+   "2019": 4.7,
+   "2020": 33.0,
+   "2021": 34.1,
+   "2022": -5.7,
+   "2023": 44.0,
+   "2024": 12.0,
+   "2025": 5.6,
+   "2026": -8.1
   },
-  "years_negative": 4,
+  "years_negative": 2,
   "sleeves": [
    "ASTRA.STAGE2",
-   "ASTRA.PULLBACK",
-   "ASTRA.MOMENTUM"
-  ]
+   "ASTRA.PULLBACK"
+  ],
+  "note": "Equal capital in STAGE2 and PULLBACK (v1.14.7 settings). MOMENTUM was dropped from the book: it lowered return without cutting drawdown."
  },
  "astra_ai_v2": {
   "walk_forward_years": {

@@ -33,7 +33,7 @@ from app.strategies.filters import passes_enhancement_filters
 # ── Parameters ───────────────────────────────────────────────────────────────
 SMA_PERIOD            = 150
 SMA_SLOPE_LOOKBACK    = 30
-HIGH_PROXIMITY_PCT    = 0.92
+HIGH_PROXIMITY_PCT    = 0.90             # v1.14.7 tuned (select 2017-24, verified on 2024-26 test)
 VOL_MULTIPLIER        = 1.5
 MIN_6M_RETURN         = 0.05
 USE_NIFTY_REGIME      = True
@@ -42,7 +42,7 @@ SUPERTREND_PERIOD     = 10
 SUPERTREND_MULT       = 3.0
 ATR_STOP_MULT         = 2.5
 MAX_STOP_PCT          = 0.12        # reject if ATR stop > 12% away from entry
-TIME_STOP_DAYS        = 40
+TIME_STOP_DAYS        = 80             # v1.14.7: let Stage-2 trends run
 
 
 class Stage2Strategy(Strategy):

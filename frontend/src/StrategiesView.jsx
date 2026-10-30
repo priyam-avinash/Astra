@@ -122,6 +122,9 @@ function StrategyCard({ strategy, onBacktest, runningName, result }) {
                 {' '}· 2017–2026: {strategy.backtest.cagr_pct}%/yr · max drawdown {strategy.backtest.max_drawdown_pct}% · Sharpe {strategy.backtest.sharpe}
                 {strategy.backtest.verdict_note ? ` — ${strategy.backtest.verdict_note}` : ''}
               </div>
+              {strategy.backtest.tuning_note && (
+                <div style={{ marginTop: 4, color: 'rgba(255,255,255,0.5)' }}>{strategy.backtest.tuning_note}</div>
+              )}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
                 {Object.entries(strategy.backtest.yearly_return_pct || {}).map(([y, v]) => (
                   <span key={y} style={{ fontSize: '0.68rem', padding: '2px 6px', borderRadius: 4,
@@ -310,8 +313,9 @@ export default function StrategiesView() {
       {summary?.combined_rules_book && (
         <div style={{ marginTop: 20, padding: 16, borderRadius: 12, background: 'rgba(34,197,94,.06)', border: '1px solid rgba(34,197,94,.25)', fontSize: '0.82rem', lineHeight: 1.6 }}>
           <div style={{ fontWeight: 700, marginBottom: 6 }}>Verified backtests (paper) — what to expect</div>
-          <div><b>Recommended book</b> (STAGE2 + PULLBACK + MOMENTUM, equal capital): {summary.combined_rules_book.cagr_pct}%/yr 2017–2026,
+          <div><b>Recommended book</b> ({(summary.combined_rules_book.sleeves || []).map(x => x.replace('ASTRA.', '')).join(' + ')}, equal capital): {summary.combined_rules_book.cagr_pct}%/yr 2017–2026,
             max drawdown {summary.combined_rules_book.max_drawdown_pct}% · NIFTY 50: {summary.benchmarks?.NIFTY50?.cagr_pct}%/yr, max drawdown {summary.benchmarks?.NIFTY50?.max_drawdown_pct}%.</div>
+          {summary.intraday && <div><b>Intraday</b> — {summary.intraday.verdict_note}</div>}
           {summary.astra_ai_v2 && <div><b>ASTRA.AI v2</b> — out-of-sample Jul 2024–Oct 2026: {summary.astra_ai_v2.test_2024_07_to_2026_10?.total_return_pct}% total
             (NIFTY {summary.astra_ai_v2.nifty_same_window_pct}%, equal-weight universe {summary.astra_ai_v2.equal_weight_same_window_pct}% over the same window); walk-forward years: {Object.entries(summary.astra_ai_v2.walk_forward_years || {}).map(([y, v]) => `${y} ${v > 0 ? '+' : ''}${v}%`).join(' · ')}.</div>}
           <div style={{ color: 'rgba(255,255,255,0.5)', marginTop: 6, fontSize: '0.74rem' }}>{summary.method}</div>

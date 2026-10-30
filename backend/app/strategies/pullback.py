@@ -48,7 +48,7 @@ VOL_MULTIPLIER       = 1.1         # lowered: bounce is already confirmation
 USE_NIFTY_REGIME     = True
 
 ATR_STOP_MULT        = 2.0         # widened: fewer noise exits
-TARGET_ATR_MULT      = 4.5         # wider target: higher-quality setups can sustain bigger moves
+TARGET_ATR_MULT      = 6.0         # v1.14.7 tuned (select 2017-24, verified on 2024-26 test)
 MIN_RR_GATE          = 1.5
 
 TRAIL_ACTIVATE_PCT   = 0.04
@@ -57,7 +57,7 @@ TIME_STOP_DAYS       = 40          # reverted to v3.2 best
 
 WIN_PROB             = 0.45
 
-USE_SECTOR_FILTER    = True        # skip setups whose sector is below its own 50-day average
+USE_SECTOR_FILTER    = False       # v1.14.7: sector filter cut good trades (tuning)
 SECTOR_SMA_DAYS      = 50
 SECTOR_MIN_MEMBERS   = 2           # need ≥2 stocks to form a sector average
 
