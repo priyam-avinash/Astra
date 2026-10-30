@@ -348,5 +348,40 @@
     }
    }
   }
+ },
+ "intraday": {
+  "method": "15-minute bars, 86 NSE large caps, ~42 trading days (Yahoo's 59-day 15m limit). Entry at the next bar's open, stop checked before target, gap-aware fills, square-off at 15:15. Costs: 0.1% slippage per side + 0.086% fees. Weights frozen (no learning from the test).",
+  "strategies": {
+   "ORB": {
+    "trades": 2781,
+    "win_rate_pct": 27.4,
+    "avg_trade_net_pct": -0.244,
+    "avg_trade_before_fees_pct": -0.158,
+    "total_pnl_rs_per_1L_trade": -678578.17
+   },
+   "EMA_Cross": {
+    "trades": 629,
+    "win_rate_pct": 21.0,
+    "avg_trade_net_pct": -0.258,
+    "avg_trade_before_fees_pct": -0.172,
+    "total_pnl_rs_per_1L_trade": -162546.0
+   },
+   "Momentum": {
+    "trades": 509,
+    "win_rate_pct": 18.9,
+    "avg_trade_net_pct": -0.258,
+    "avg_trade_before_fees_pct": -0.172,
+    "total_pnl_rs_per_1L_trade": -131566.6
+   },
+   "Combined": {
+    "trades": 3006,
+    "win_rate_pct": 26.7,
+    "avg_trade_net_pct": -0.248,
+    "avg_trade_before_fees_pct": -0.162,
+    "total_pnl_rs_per_1L_trade": -745255.68
+   }
+  },
+  "recommended": false,
+  "verdict_note": "No edge after costs: every intraday strategy loses about 0.25% per trade. Paper-trade only for study; 42 days is too short to tune on without overfitting."
  }
 }

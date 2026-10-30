@@ -239,6 +239,15 @@ export default function IntradayView() {
   return (
     <div style={{ padding: '24px', maxWidth: 1100, margin: '0 auto' }}>
 
+      <div role="note" style={{
+        background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.35)', color: '#f59e0b',
+        borderRadius: 10, padding: '10px 14px', fontSize: 12, marginBottom: 16, lineHeight: 1.5,
+      }}>
+        <strong>Experimental — no verified edge.</strong> In a look-ahead-free backtest across 86 NSE stocks
+        (~42 trading days), every intraday strategy lost about 0.25% per trade after slippage and fees.
+        Use for paper study only.
+      </div>
+
       {/* ── Header ──────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

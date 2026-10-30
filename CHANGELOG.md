@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.2 — 2026-10-30
+- Intraday backtest made look-ahead free: next-bar-open entries, stop checked before target with gap-aware fills, trailing stop applies from the next bar, square-off at the 15:15 open, trend filter and ORB volume use only past bars, daily-reset VWAP (live + backtest), Combined picks the earliest signal, universe backtest no longer learns from its own test; result: no intraday strategy has an edge after costs (about -0.25% per trade), flagged experimental in the UI
+
 ## 1.14.1 — 2026-10-24
 - Audit fixes: atomic position closes (no double booking), one-time signal execution, SL/TP re-anchored to fills, INR portfolio with live USD/INR, no fills on after-hours/stale quotes, NSE market-hours check, brokerage in P&L, IST trading day; mutual funds priced at the order date's NAV (pending until published), SIP double-booking fix; security: API keys scrubbed from errors, Upstox OAuth state + browser binding, WebSocket auth, owner-only settings/kill switch (persisted), safer registration, JWT typ claim, encrypted-credential key, Docker ports
 

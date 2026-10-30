@@ -283,6 +283,15 @@ def _compute_vwap(df: pd.DataFrame) -> pd.Series:
     return cum_tpv / cum_vol.replace(0, np.nan)
 
 
+def _compute_daily_vwap(df: pd.DataFrame) -> pd.Series:
+    """Session VWAP that resets at the start of every trading day."""
+    typical = (df["High"] + df["Low"] + df["Close"]) / 3
+    day = pd.Series(df.index.date, index=df.index)
+    cum_vol = df["Volume"].groupby(day).cumsum()
+    cum_tpv = (typical * df["Volume"]).groupby(day).cumsum()
+    return cum_tpv / cum_vol.replace(0, np.nan)
+
+
 def _compute_rsi_series(series: pd.Series, period: int = 14) -> pd.Series:
     """Wilder's RSI."""
     delta = series.diff()
@@ -416,7 +425,7 @@ def ema_cross_signal(df: pd.DataFrame) -> dict:
     df["EMA5"]  = df["Close"].ewm(span=5,  adjust=False).mean()
     df["EMA13"] = df["Close"].ewm(span=13, adjust=False).mean()
     df["RSI"]   = _compute_rsi_series(df["Close"])
-    df["VWAP"]  = _compute_vwap(df)
+    df["VWAP"]  = _compute_daily_vwap(df)
 
     valid = df.dropna(subset=["EMA5", "EMA13", "RSI", "VWAP"])
     if len(valid) < 2:

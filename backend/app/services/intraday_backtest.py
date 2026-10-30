@@ -20,6 +20,7 @@ import pytz
 from app.services.intraday_engine import (
     _fetch_intraday_extended,
     _compute_vwap,
+    _compute_daily_vwap,
     _compute_rsi_series,
     _compute_macd,
     _compute_atr,
@@ -57,88 +58,119 @@ TRANSACTION_COST_PCT = 0.00086   # 0.086% round-trip, applied to pnl_pct at exit
 # ── Per-trade simulation ──────────────────────────────────────────────────────
 
 def _simulate_trade(signal: str, entry_price: float, sl: float, tp: float,
-                    future_bars: pd.DataFrame) -> dict:
+                    future_bars: pd.DataFrame, entry_slipped: bool = False) -> dict:
     """
-    Walk-forward bar-by-bar simulation with:
-    - Slippage (0.1% per side) applied at entry
-    - Trailing SL: breakeven after 50% of move to TP, then 50%-of-TP trail after 75%
-    - SL checked before TP on each bar (conservative, worst-case intrabar)
-    - Auto square-off at 15:15 IST
-
-    Returns dict with: outcome, exit_price, pnl_pct, pnl_rs, bars_held
+    Bar-by-bar simulation with no intrabar look-ahead:
+    - entry fill = entry_price ± 0.1% slippage (skipped if `entry_slipped`)
+    - each bar: the stop set on PREVIOUS bars is checked first, then the target
+      (if both are touched in one bar the stop wins — conservative)
+    - gap-aware stop fills: BUY exits at min(stop, Open), SELL at max(stop, Open);
+      stop exits pay exit slippage, targets fill at the target price
+    - trailing stop (breakeven at 50% of the move to TP, 50%-of-TP trail at 75%)
+      is updated at the END of a bar, so a new level only applies from the next bar
+    - auto square-off at the OPEN of the 15:15 bar (its close is 15 minutes later)
     """
     sq_off = dtime(*[int(x) for x in SQUARE_OFF_TIME.split(":")])
-
-    # Apply slippage at entry
-    if signal == "BUY":
-        fill_price = entry_price * (1 + SLIPPAGE_PCT)
+    if entry_slipped:
+        fill_price = entry_price
     else:
-        fill_price = entry_price * (1 - SLIPPAGE_PCT)
+        fill_price = entry_price * (1 + SLIPPAGE_PCT) if signal == "BUY" else entry_price * (1 - SLIPPAGE_PCT)
 
-    # Dynamic trailing SL (starts at original SL, tracks profit)
+    def _pnl(exit_px):
+        return (exit_px - fill_price) / fill_price if signal == "BUY" else (fill_price - exit_px) / fill_price
+
+    def _slip_exit(px):
+        return px * (1 - SLIPPAGE_PCT) if signal == "BUY" else px * (1 + SLIPPAGE_PCT)
+
     trailing_sl = sl
-    move_to_tp  = abs(tp - fill_price)   # total move from fill to TP
+    move_to_tp = abs(tp - fill_price)
 
     for i, (ts, bar) in enumerate(future_bars.iterrows()):
         bar_time = ts.time() if hasattr(ts, "time") else ts.to_pydatetime().time()
+        o, high, low = float(bar["Open"]), float(bar["High"]), float(bar["Low"])
 
-        high  = float(bar["High"])
-        low   = float(bar["Low"])
-        close = float(bar["Close"])
+        if bar_time >= sq_off:
+            px = _slip_exit(o)
+            return _trade_result("SQ_OFF", px, _pnl(px), i + 1)
 
-        # Update trailing SL based on how far price has moved toward TP
+        if signal == "BUY":
+            if low <= trailing_sl:
+                px = _slip_exit(min(trailing_sl, o))
+                return _trade_result("SL", px, _pnl(px), i + 1)
+            if high >= tp:
+                return _trade_result("TP", tp, _pnl(tp), i + 1)
+        else:
+            if high >= trailing_sl:
+                px = _slip_exit(max(trailing_sl, o))
+                return _trade_result("SL", px, _pnl(px), i + 1)
+            if low <= tp:
+                return _trade_result("TP", tp, _pnl(tp), i + 1)
+
+        # end of bar: raise the trail for the NEXT bar
         if move_to_tp > 0:
             if signal == "BUY":
                 progress = (high - fill_price) / move_to_tp
                 if progress >= 0.75:
-                    new_trail = fill_price + move_to_tp * 0.50   # trail to 50% of TP
-                    trailing_sl = max(trailing_sl, new_trail)
+                    trailing_sl = max(trailing_sl, fill_price + move_to_tp * 0.50)
                 elif progress >= 0.50:
-                    trailing_sl = max(trailing_sl, fill_price)    # breakeven
-            else:  # SELL
+                    trailing_sl = max(trailing_sl, fill_price)
+            else:
                 progress = (fill_price - low) / move_to_tp
                 if progress >= 0.75:
-                    new_trail = fill_price - move_to_tp * 0.50
-                    trailing_sl = min(trailing_sl, new_trail)
+                    trailing_sl = min(trailing_sl, fill_price - move_to_tp * 0.50)
                 elif progress >= 0.50:
-                    trailing_sl = min(trailing_sl, fill_price)    # breakeven
+                    trailing_sl = min(trailing_sl, fill_price)
 
-        if signal == "BUY":
-            if low <= trailing_sl:
-                exit_price = trailing_sl
-                pnl_pct    = (exit_price - fill_price) / fill_price
-                return _trade_result("SL", exit_price, pnl_pct, i + 1)
-            if high >= tp:
-                exit_price = tp
-                pnl_pct    = (exit_price - fill_price) / fill_price
-                return _trade_result("TP", exit_price, pnl_pct, i + 1)
-        else:  # SELL
-            if high >= trailing_sl:
-                exit_price = trailing_sl
-                pnl_pct    = (fill_price - exit_price) / fill_price
-                return _trade_result("SL", exit_price, pnl_pct, i + 1)
-            if low <= tp:
-                exit_price = tp
-                pnl_pct    = (fill_price - exit_price) / fill_price
-                return _trade_result("TP", exit_price, pnl_pct, i + 1)
-
-        # Auto square-off at 15:15
-        if bar_time >= sq_off:
-            exit_price = close * (1 - SLIPPAGE_PCT) if signal == "BUY" else close * (1 + SLIPPAGE_PCT)
-            if signal == "BUY":
-                pnl_pct = (exit_price - fill_price) / fill_price
-            else:
-                pnl_pct = (fill_price - exit_price) / fill_price
-            return _trade_result("SQ_OFF", exit_price, pnl_pct, i + 1)
-
-    # End of data without resolution → square-off at last bar close
     if not future_bars.empty:
-        raw_exit   = float(future_bars.iloc[-1]["Close"])
-        exit_price = raw_exit * (1 - SLIPPAGE_PCT) if signal == "BUY" else raw_exit * (1 + SLIPPAGE_PCT)
-        pnl_pct    = (exit_price - fill_price) / fill_price if signal == "BUY" else (fill_price - exit_price) / fill_price
-        return _trade_result("SQ_OFF", exit_price, pnl_pct, len(future_bars))
-
+        px = _slip_exit(float(future_bars.iloc[-1]["Close"]))
+        return _trade_result("SQ_OFF", px, _pnl(px), len(future_bars))
     return _trade_result("NO_EXIT", entry_price, 0.0, 0)
+
+
+def _execute_signal(sig: dict, day_df: pd.DataFrame) -> Optional[dict]:
+    """
+    Enter at the NEXT bar's open after the signal bar (the signal is only known
+    once that bar has closed). SL/TP keep their distance from the signal price,
+    re-anchored to the actual entry. No trade if the next bar is at/after 15:15.
+    """
+    sq_off = dtime(*[int(x) for x in SQUARE_OFF_TIME.split(":")])
+    after = day_df[day_df.index > sig["ts"]]
+    if after.empty:
+        return None
+    entry_ts = after.index[0]
+    if entry_ts.time() >= sq_off:
+        return None
+    raw_open = float(after.iloc[0]["Open"])
+    fill = raw_open * (1 + SLIPPAGE_PCT) if sig["signal"] == "BUY" else raw_open * (1 - SLIPPAGE_PCT)
+    shift = fill - sig["entry_price"]
+    sl, tp = sig["sl"] + shift, sig["tp"] + shift
+    res = _simulate_trade(sig["signal"], fill, sl, tp, after, entry_slipped=True)
+    return {"signal": sig["signal"], "signal_time": str(sig["ts"]), "signal_price": sig["entry_price"],
+            "entry_time": str(entry_ts), "entry_price": round(fill, 2), "sl": round(sl, 2), "tp": round(tp, 2),
+            **res}
+
+
+def _pick_combined_signal(signals: list) -> Optional[dict]:
+    """
+    Combined strategy without look-ahead: take the EARLIEST signal bar of the
+    day; consensus is counted only among signals on that same bar. A tie with
+    no majority → no trade; otherwise the best reward:risk wins.
+    """
+    sigs = [s for s in signals if s is not None]
+    if not sigs:
+        return None
+    first_ts = min(s["ts"] for s in sigs)
+    same = [s for s in sigs if s["ts"] == first_ts]
+    buys = [s for s in same if s["signal"] == "BUY"]
+    sells = [s for s in same if s["signal"] == "SELL"]
+    if buys and sells and len(buys) == len(sells):
+        return None
+    dominant = buys if len(buys) > len(sells) else sells
+
+    def _rr(sig):
+        risk = abs(sig["entry_price"] - sig["sl"])
+        return abs(sig["tp"] - sig["entry_price"]) / risk if risk > 0 else 0.0
+    return max(dominant, key=_rr)
 
 
 def _trade_result(outcome: str, exit_price: float, pnl_pct: float, bars_held: int) -> dict:
@@ -166,7 +198,6 @@ def _get_orb_signal_for_day(day_df: pd.DataFrame, date) -> Optional[dict]:
     if orb_high is None:
         return None
 
-    avg_vol  = day_df["Volume"].mean() if not day_df.empty else 0
     orb_end  = dtime(9, 15 + ORB_WINDOW_MIN)
     no_trade = dtime(*[int(x) for x in NO_TRADE_AFTER.split(":")])
 
@@ -174,6 +205,7 @@ def _get_orb_signal_for_day(day_df: pd.DataFrame, date) -> Optional[dict]:
 
     for ts, bar in post_orb.iterrows():
         close  = float(bar["Close"])
+        avg_vol = float(day_df.loc[:ts, "Volume"].mean())   # only bars seen so far
         # Require at least 1.1× average volume — mild surge confirms genuine breakout
         # (1.5× was too strict: fires 0 times on GBM synthetic data due to uniform lognormal vol)
         vol_ok = float(bar["Volume"]) >= 1.1 * avg_vol if avg_vol > 0 else True
@@ -204,7 +236,7 @@ def _get_ema_cross_signal_for_day(day_df: pd.DataFrame, full_df: pd.DataFrame) -
     df["EMA5"]  = df["Close"].ewm(span=5,  adjust=False).mean()
     df["EMA13"] = df["Close"].ewm(span=13, adjust=False).mean()
     df["RSI"]   = _compute_rsi_series(df["Close"])
-    df["VWAP"]  = _compute_vwap(df)
+    df["VWAP"]  = _compute_daily_vwap(df)
     no_trade    = dtime(*[int(x) for x in NO_TRADE_AFTER.split(":")])
 
     rows = list(df.iterrows())
@@ -224,13 +256,13 @@ def _get_ema_cross_signal_for_day(day_df: pd.DataFrame, full_df: pd.DataFrame) -
         bear_cross = float(prev_row["EMA5"]) >= float(prev_row["EMA13"]) and float(row["EMA5"]) < float(row["EMA13"])
 
         if bull_cross and rsi > 50 and close > vwap:
-            if not _trend_aligned(full_df, "BUY"):
+            if not _trend_aligned(full_df.loc[:ts], "BUY"):
                 continue
             sl, tp = _atr_sl_tp(df.iloc[:i+1], close, "BUY")
             return {"signal": "BUY",  "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
 
         if bear_cross and rsi < 50 and close < vwap:
-            if not _trend_aligned(full_df, "SELL"):
+            if not _trend_aligned(full_df.loc[:ts], "SELL"):
                 continue
             sl, tp = _atr_sl_tp(df.iloc[:i+1], close, "SELL")
             return {"signal": "SELL", "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
@@ -263,13 +295,13 @@ def _get_momentum_signal_for_day(day_df: pd.DataFrame, full_df: pd.DataFrame) ->
             bull_cross = float(prev_row["MACD"]) <= float(prev_row["MACD_Sig"]) and float(row["MACD"]) > float(row["MACD_Sig"])
             bear_cross = float(prev_row["MACD"]) >= float(prev_row["MACD_Sig"]) and float(row["MACD"]) < float(row["MACD_Sig"])
             if rsi > 55 and hist > 0 and bull_cross:
-                if not _trend_aligned(full_df, "BUY"):
+                if not _trend_aligned(full_df.loc[:ts], "BUY"):
                     prev_row = row
                     continue
                 sl, tp = _atr_sl_tp(df.loc[:ts], close, "BUY")
                 return {"signal": "BUY",  "entry_price": close, "sl": sl, "tp": tp, "ts": ts}
             elif rsi < 45 and hist < 0 and bear_cross:
-                if not _trend_aligned(full_df, "SELL"):
+                if not _trend_aligned(full_df.loc[:ts], "SELL"):
                     prev_row = row
                     continue
                 sl, tp = _atr_sl_tp(df.loc[:ts], close, "SELL")
@@ -390,70 +422,28 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
         ema_sig  = _get_ema_cross_signal_for_day(day_df, df)
         mom_sig  = _get_momentum_signal_for_day(day_df, df)
 
-        def _simulate_if_signal(sig, strategy_name, trade_list):
+        def _simulate_if_signal(sig, strategy_name, trade_list, log=True):
             if sig is None:
-                return
-            entry_ts = sig["ts"]
-            future   = day_df[day_df.index > entry_ts]
-            if future.empty:
-                return
-            res = _simulate_trade(sig["signal"], sig["entry_price"], sig["sl"], sig["tp"], future)
-            record = {
-                "date":       str(date),
-                "strategy":   strategy_name,
-                "signal":     sig["signal"],
-                "entry_price":sig["entry_price"],
-                "sl":         sig["sl"],
-                "tp":         sig["tp"],
-                **res,
-            }
+                return None
+            res = _execute_signal(sig, day_df)
+            if res is None:
+                return None
+            record = {"date": str(date), "strategy": strategy_name, **res}
             trade_list.append(record)
-            trade_log.append(record)
+            if log:
+                trade_log.append(record)
+            return record
 
         _simulate_if_signal(orb_sig,  "ORB",      orb_trades)
         _simulate_if_signal(ema_sig,  "EMA_Cross", ema_trades)
         _simulate_if_signal(mom_sig,  "Momentum", mom_trades)
 
-        # Combined: prefer consensus direction, then pick highest-quality signal
-        signals_today = [s for s in [orb_sig, ema_sig, mom_sig] if s is not None]
-        if signals_today:
-            buys  = [s for s in signals_today if s["signal"] == "BUY"]
-            sells = [s for s in signals_today if s["signal"] == "SELL"]
-            dominant = buys if len(buys) >= len(sells) else sells
-
-            def _signal_score(sig: dict) -> float:
-                """Higher R:R and later timestamp (more confirmation) = better signal."""
-                entry = sig.get("entry_price", 1.0)
-                sl    = sig.get("sl", entry)
-                tp    = sig.get("tp", entry)
-                risk  = abs(entry - sl)
-                reward = abs(tp - entry)
-                rr    = reward / risk if risk > 0 else 0.0
-                # Prefer higher R:R; tiebreak: later entry (more bars of confirmation)
-                ts_score = sig.get("ts", pd.Timestamp.min)
-                return (rr, ts_score)
-
-            chosen = max(dominant, key=_signal_score)
-            future = day_df[day_df.index > chosen["ts"]]
-            if not future.empty:
-                res = _simulate_trade(chosen["signal"], chosen["entry_price"],
-                                      chosen["sl"], chosen["tp"], future)
-                record = {
-                    "date":       str(date),
-                    "strategy":   "Combined",
-                    "signal":     chosen["signal"],
-                    "entry_price":chosen["entry_price"],
-                    "sl":         chosen["sl"],
-                    "tp":         chosen["tp"],
-                    **res,
-                }
-                combined_trades.append(record)
-                cum_combined += res["pnl_rs"]
-                equity_curve.append({
-                    "date":       str(date),
-                    "pnl_rs":     round(res["pnl_rs"], 2),
-                    "cum_pnl_rs": round(cum_combined, 2),
-                })
+        rec = _simulate_if_signal(_pick_combined_signal([orb_sig, ema_sig, mom_sig]), "Combined",
+                                  combined_trades, log=False)
+        if rec is not None:
+            cum_combined += rec["pnl_rs"]
+            equity_curve.append({"date": str(date), "pnl_rs": round(rec["pnl_rs"], 2),
+                                 "cum_pnl_rs": round(cum_combined, 2)})
 
     return {
         "symbol":               clean,
@@ -468,15 +458,17 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
             "Combined": _build_stats(combined_trades),
         },
         "trade_log":    trade_log,
+        "combined_log": combined_trades,
         "equity_curve": equity_curve,
         "data_source": data_source,
         "synthetic_data": is_synthetic,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "note": (
-            "Backtest uses ₹1L notional per trade. ATR-based SL/TP (1× ATR SL, 3× ATR TP, "
-            "floor 0.3%/0.9%). Trailing SL: breakeven at 50% to TP, trail at 75%. "
-            "Slippage: 0.1% per side. ORB volume filter: 1.1× avg. "
-            "Sharpe: daily-aggregated returns. Auto square-off 15:15 IST."
+            "Backtest uses ₹1L notional per trade. Entry at the next bar's open after the signal bar. "
+            "ATR-based SL/TP (1× ATR SL, 3× ATR TP, floor 0.3%/0.9%). Stop checked before target, "
+            "gap-aware fills; trailing SL (breakeven at 50% to TP, trail at 75%) applies from the next bar. "
+            "Slippage: 0.1% per side + 0.086% fees. ORB volume filter: 1.1× the day's average so far. "
+            "Sharpe: daily-aggregated returns. Auto square-off at 15:15 IST open."
         ),
     }
 
@@ -484,66 +476,51 @@ def run_intraday_backtest(symbol: str, days: int = 30) -> dict:
 # ─── Universe-driven backtest (Task 3 — dynamic stock selection + Layer-1) ───
 
 def run_universe_backtest(days: int = 30, top_n_per_strategy: int = 15,
-                          use_weights: bool = True) -> dict:
+                          use_weights: bool = True, freeze_weights: bool = True,
+                          symbols: Optional[list] = None) -> dict:
     """
-    Universe-driven backtest:
-      1. Rank universe → top-N stocks per strategy
-      2. For each strategy, backtest only its top-N stocks
-      3. Apply signal_weights filter (skip combos with weight < 0.3)
-      4. Update signal_weights after every closed trade
-      5. Return aggregate stats per strategy + per-symbol breakdown
+    Backtest every symbol of the intraday universe (or `symbols`).
 
-    `use_weights=False` disables the Layer-1 filter (useful for clean baseline).
+    By default (`freeze_weights=True`) the run is out-of-sample: nothing is
+    learned from the backtest trades and no Layer-1 weight filter is applied,
+    and stocks are NOT pre-selected with rank_universe() (that ranks on today's
+    data, which overlaps the test window). `top_n_per_strategy` and
+    `use_weights` are reported only.
+
+    `freeze_weights=False` restores the old learn-and-filter behaviour — the
+    result is then flagged `in_sample: True`.
     """
-    from app.services.intraday_universe import rank_universe
+    from app.services.intraday_universe import INTRADAY_UNIVERSE
     from app.services.signal_weights import signal_weights
 
-    logger.info(f"[universe-backtest] days={days} top_n={top_n_per_strategy} weights={use_weights}")
-    ranked = rank_universe(top_n=top_n_per_strategy)
+    strategies = ["ORB", "EMA_Cross", "Momentum", "Combined"]
+    syms = list(symbols or INTRADAY_UNIVERSE)
+    filter_on = use_weights and not freeze_weights
+    logger.info(f"[universe-backtest] days={days} symbols={len(syms)} freeze={freeze_weights}")
 
-    strategy_universes = {
-        "ORB":       ranked.get("ORB",       []),
-        "EMA_Cross": ranked.get("EMA_Cross", []),
-        "Momentum":  ranked.get("Momentum",  []),
-    }
-
-    per_strategy_trades: dict = {s: [] for s in strategy_universes}
-    per_symbol_results: dict  = {}
+    per_strategy_trades: dict = {s: [] for s in strategies}
+    per_symbol_results: dict = {}
     skipped_by_weight = 0
 
-    # Build a deduplicated set of symbols to backtest (avoid running same stock 3x)
-    all_symbols: set = set()
-    for syms in strategy_universes.values():
-        all_symbols.update(syms)
-
-    backtest_cache: dict = {}
-    for sym in all_symbols:
-        backtest_cache[sym] = run_intraday_backtest(sym, days=days)
-
-    for strategy, symbols in strategy_universes.items():
-        logger.info(f"[universe-backtest] {strategy}: {len(symbols)} symbols")
-        for sym in symbols:
-            if use_weights and signal_weights.weight(strategy, sym) < 0.3:
+    for sym in syms:
+        res = run_intraday_backtest(sym, days=days)
+        if not res or "error" in res:
+            continue
+        logs = {"Combined": []}
+        for t in res["trade_log"]:
+            logs.setdefault(t["strategy"], []).append(t)
+        for strategy in strategies:
+            if filter_on and strategy != "Combined" and signal_weights.weight(strategy, sym) < 0.3:
                 skipped_by_weight += 1
                 continue
-
-            res = backtest_cache.get(sym, {})
-            if "error" in res or not res:
-                continue
             stats = res["strategies"].get(strategy, {})
-            trade_log = [t for t in res["trade_log"] if t["strategy"] == strategy]
-
             per_symbol_results.setdefault(sym, {})[strategy] = {
-                "trades":     stats.get("trades", 0),
-                "win_rate":   stats.get("win_rate_pct", 0),
-                "pnl_rs":     stats.get("total_pnl_rs", 0),
-            }
-
-            for t in trade_log:
+                "trades": stats.get("trades", 0), "win_rate": stats.get("win_rate_pct", 0),
+                "pnl_rs": stats.get("total_pnl_rs", 0)}
+            for t in res.get("combined_log", []) if strategy == "Combined" else logs.get(strategy, []):
                 per_strategy_trades[strategy].append({**t, "symbol": sym})
-                # Always learn — even when filter is disabled we populate weights
-                # so the next run with weights ON has data to filter against.
-                signal_weights.update(strategy, sym, t["pnl_rs"])
+                if not freeze_weights and strategy != "Combined":
+                    signal_weights.update(strategy, sym, t["pnl_rs"])
 
     aggregate: dict = {}
     for strat, trades in per_strategy_trades.items():
@@ -551,23 +528,26 @@ def run_universe_backtest(days: int = 30, top_n_per_strategy: int = 15,
             aggregate[strat] = {"trades": 0, "win_rate_pct": 0, "total_pnl_rs": 0}
             continue
         wins = [t for t in trades if t["pnl_rs"] > 0]
+        total = sum(t["pnl_rs"] for t in trades)
         aggregate[strat] = {
-            "trades":         len(trades),
-            "wins":           len(wins),
-            "losses":         len(trades) - len(wins),
-            "win_rate_pct":   round(len(wins) / len(trades) * 100, 1),
-            "total_pnl_rs":   round(sum(t["pnl_rs"] for t in trades), 2),
-            "avg_pnl_rs":     round(sum(t["pnl_rs"] for t in trades) / len(trades), 2),
+            "trades": len(trades), "wins": len(wins), "losses": len(trades) - len(wins),
+            "win_rate_pct": round(len(wins) / len(trades) * 100, 1),
+            "total_pnl_rs": round(total, 2), "avg_pnl_rs": round(total / len(trades), 2),
+            "avg_pnl_pct": round(sum(t["pnl_pct"] for t in trades) / len(trades), 3),
+            "gross_avg_pnl_pct": round(sum(t.get("gross_pnl_pct", 0) for t in trades) / len(trades), 3),
             "symbols_traded": len({t["symbol"] for t in trades}),
         }
 
     return {
-        "period_days":         days,
-        "top_n_per_strategy":  top_n_per_strategy,
-        "use_weights":         use_weights,
-        "skipped_by_weight":   skipped_by_weight,
-        "universe_used":       strategy_universes,
-        "aggregate":           aggregate,
-        "per_symbol":          per_symbol_results,
-        "generated_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "period_days": days,
+        "top_n_per_strategy": top_n_per_strategy,
+        "use_weights": filter_on,
+        "use_weights_requested": use_weights,
+        "freeze_weights": freeze_weights,
+        "in_sample": not freeze_weights,
+        "skipped_by_weight": skipped_by_weight,
+        "universe_used": {s: syms for s in strategies},
+        "aggregate": aggregate,
+        "per_symbol": per_symbol_results,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
