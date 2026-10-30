@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.9 — 2026-10-30
+- ASTRA 1.0: 2x ATR stop and 6x ATR target (was 1.5/3) - 2017-2026 backtest -6.7%/yr -> +8.3%/yr (drawdown -50.9% -> -30.2%); still trails NIFTY, stays not recommended
+
 ## 1.14.8 — 2026-10-30
 - ASTRA.CRYPTO altcoins/memes: breakouts only while BTC is above its 200-day average (3x ATR stop, 4.5x target, 20-day limit) - untouched 2024-2026 test improved from -10.3%/yr (-70% drawdown) to +0.6%/yr (-47%); majors keep the regime switch (+9.2%/yr on the test; the tuned variant was worse)
 

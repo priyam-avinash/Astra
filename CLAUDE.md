@@ -140,7 +140,7 @@ Core tables: `users`, `active_signals` (TargetSignal), `active_positions` (Activ
 `_is_macro_bullish()` fetches NIFTY 50 (`^NSEI`) daily data, checks if Close > SMA-200. Result cached 1 hour. BUY signals are blocked (set to HOLD) in bear regime. Requires internet on startup.
 
 ### ATR-Based SL/TP Multipliers
-- ASTRA 1.0: SL=1.5×ATR, TP=3.0×ATR
+- ASTRA 1.0: SL=2.0×ATR, TP=6.0×ATR (`ASTRA1` config)
 - ASTRA.AI: SL=1.6×ATR, TP=4.0×ATR
 - ASTRA.ML: SL=1.5×ATR, TP=3.5×ATR
 - Crypto major/altcoin/meme: different multipliers in `crypto_engine.py:RISK_CONFIG`

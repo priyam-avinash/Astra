@@ -109,8 +109,8 @@ ASTRA1 = {
     "min_bull": 4,          # confirmations needed (of 7) when NIFTY > SMA200
     "min_bear": 5,          # … when NIFTY < SMA200
     "block_bear": False,    # True → no BUYs at all in a bear regime
-    "sl_atr": 1.5,
-    "tp_atr": 3.0,
+    "sl_atr": 2.0,          # v1.14.9 tuned: wider stop + 6×ATR target (test −18% → −9%/yr; still negative)
+    "tp_atr": 6.0,
 }
 
 # ── ASTRA.ML inference helpers (3-class BiLSTM) ───────────────────────────────
