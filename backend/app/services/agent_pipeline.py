@@ -93,7 +93,7 @@ class AgentPipeline:
         confidence = float(result.get("confidence", 50.0))
         entry      = float(result.get("entry_price", 0))
         sl         = float(result.get("stop_loss",   0))
-        tp         = float(result.get("target",      0))
+        tp         = float(result.get("target") or 0) or None   # v2.1 signals carry no fixed target
         indicators = self._extract_indicators(result)
 
         # ── Fetch context data ────────────────────────────────────────

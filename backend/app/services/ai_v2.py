@@ -39,6 +39,7 @@ class AIv2:
         self.models_dir = Path(models_dir)
         self.cfg: Optional[dict] = None
         self.model = None
+        self.models: list = []
         self._snap: Optional[pd.DataFrame] = None
         self._snap_at = 0.0
         self._lock = threading.Lock()
@@ -46,19 +47,26 @@ class AIv2:
 
     def _load(self):
         cfg_path = self.models_dir / "astra_ai_v2.json"
-        npz = self.models_dir / "astra_ai_v2_trees.npz"
-        if not (cfg_path.exists() and npz.exists()):
+        if not cfg_path.exists():
             logger.info("ASTRA.AI v2 model not found — v1 Random Forest stays active")
             return
         try:
             from app.services.tree_ensemble import NumpyForestRegressor
-            self.cfg = json.loads(cfg_path.read_text())
-            self.model = NumpyForestRegressor.load(str(npz))
-            logger.info(f"Loaded ASTRA.AI v2 ({self.cfg.get('label')}/{self.cfg.get('algo')}, "
-                        f"trained to {self.cfg.get('trained_until')})")
+            cfg = json.loads(cfg_path.read_text())
+            files = [m["file"] for m in cfg.get("models", [])] or ["astra_ai_v2_trees.npz"]
+            models = [NumpyForestRegressor.load(str(self.models_dir / f)) for f in files]
+            self.cfg, self.models = cfg, models
+            self.model = models[0]
+            logger.info(f"Loaded ASTRA.AI v{cfg.get('version', '2')} ({cfg.get('label')}, {len(models)} model(s), "
+                        f"trained to {cfg.get('trained_until')})")
         except Exception as e:
             logger.error(f"ASTRA.AI v2 failed to load: {e}")
             self.cfg = self.model = None
+            self.models = []
+
+    @property
+    def rotation(self) -> bool:
+        return bool(self.cfg) and self.cfg.get("rule") == "rotation"
 
     @property
     def available(self) -> bool:
@@ -113,8 +121,15 @@ class AIv2:
             ok = ds[feats].notna().all(axis=1)
             ds["score"] = np.nan
             if ok.any():
-                ds.loc[ok, "score"] = self.model.predict(ds.loc[ok, feats].values)
+                X = ds.loc[ok, feats].values
+                if len(self.models) > 1:
+                    # ensemble: mean of each model's percentile rank in today's universe
+                    ranks = [pd.Series(m.predict(X)).rank(pct=True).values for m in self.models]
+                    ds.loc[ok, "score"] = np.mean(ranks, axis=0)
+                else:
+                    ds.loc[ok, "score"] = self.model.predict(X)
             ds["pct"] = ds["score"].rank(pct=True)
+            ds["rank_pos"] = ds["score"].rank(ascending=False, method="first")
             self._snap, self._snap_at = ds.set_index("symbol"), time.time()
             logger.info(f"[v2] snapshot built: {int(ok.sum())}/{len(rows)} stocks scored "
                         f"({len(rows) - len(ds)} dropped for stale bars)")
@@ -130,21 +145,34 @@ class AIv2:
         if sym not in snap.index or pd.isna(snap.at[sym, "score"]):
             return None
         row = snap.loc[sym]
-        q = float(self.cfg.get("q", 0.9))
         regime_ok = (not self.cfg.get("regime")) or float(row.get("mkt_above_200", 1)) > 0.5
         pct = float(row["pct"])
-        signal = "BUY" if (pct >= q and regime_ok) else "HOLD"
-        reason = None
-        if pct >= q and not regime_ok:
+        if self.rotation:
+            top = int(self.cfg.get("top_n", 10))
+            selected = float(row["rank_pos"]) <= top
+            reason = (f"Rank {int(row['rank_pos'])} of {int(snap['score'].notna().sum())} — "
+                      + (f"in today's top {top}" if selected else f"outside today's top {top}"))
+        else:
+            q = float(self.cfg.get("q", 0.9))
+            selected = pct >= q
+            reason = None
+        signal = "BUY" if (selected and regime_ok) else "HOLD"
+        if selected and not regime_ok:
             reason = "Top-ranked, but NIFTY is below its 200-day average (regime filter)"
+        tp = self.cfg.get("tgt_k", 3.0)
         return {
             "signal": signal,
             "confidence": round(pct * 100, 1),            # universe percentile of the model score
             "score": round(float(row["score"]), 4),
             "rank_pct": round(pct * 100, 1),
             "sl_atr": float(self.cfg.get("stop_k", 1.5)),
-            "tp_atr": float(self.cfg.get("tgt_k", 3.0)),
-            "max_hold_days": int(self.cfg.get("max_bars", 20)),
+            "tp_atr": float(tp) if tp else None,
+            "max_hold_days": int(self.cfg.get("max_bars", 20)) if not self.rotation else None,
+            "rank_pos": int(row["rank_pos"]),
+            "exit_rule": (f"Hold at least {self.cfg.get('min_hold_days')} trading days, then sell once the stock "
+                          f"falls out of the top {int(round((1 - self.cfg.get('keep_pct', 0.5)) * 100))}% of the "
+                          f"universe; safety stop {self.cfg.get('stop_k')}×ATR; no fixed target")
+                         if self.rotation else None,
             "regime_bull": bool(float(row.get("mkt_above_200", 1)) > 0.5),
             "reason": reason,
         }
@@ -155,19 +183,41 @@ class AIv2:
         snap = self.snapshot().dropna(subset=["score"]).sort_values("score", ascending=False)
         q = float(self.cfg.get("q", 0.9))
         regime_ok = (not self.cfg.get("regime")) or float(snap["mkt_above_200"].iloc[0]) > 0.5
+        tgt = self.cfg.get("tgt_k", 3.0)
         out = []
         for sym, row in snap.head(top_k).iterrows():
             atr, close = float(row["ATR"]), float(row["Close"])
-            buy = float(row["pct"]) >= q and regime_ok
+            sel = float(row["rank_pos"]) <= int(self.cfg.get("top_n", 10)) if self.rotation else float(row["pct"]) >= q
+            buy = sel and regime_ok
             out.append({
                 "symbol": f"{sym}.NS", "signal": "BUY" if buy else "HOLD",
                 "confidence": round(float(row["pct"]) * 100, 1),
+                "rank_pos": int(row["rank_pos"]),
                 "entry_price": round(close, 2),
                 "stop_loss": round(close - float(self.cfg.get("stop_k", 1.5)) * atr, 2),
-                "target": round(close + float(self.cfg.get("tgt_k", 3.0)) * atr, 2),
+                "target": round(close + float(tgt) * atr, 2) if tgt else None,
                 "sector": row.get("sector"), "engine": "astra_ai_v2",
             })
         return out
+
+    def rank_exit_due(self, symbol: str, entry_time, now=None) -> Optional[str]:
+        """Rotation exit rule for an open ASTRA.AI position: after the minimum hold,
+        sell once the stock's rank drops below keep_pct. Returns a reason or None."""
+        if not (self.available and self.rotation) or entry_time is None:
+            return None
+        now = now or pd.Timestamp.utcnow().tz_localize(None)
+        held = int(np.busday_count(pd.Timestamp(entry_time).date(), pd.Timestamp(now).date()))
+        if held < int(self.cfg.get("min_hold_days", 40)):
+            return None
+        snap = self.snapshot()
+        sym = symbol.upper().replace(".NS", "")
+        if sym not in snap.index or pd.isna(snap.at[sym, "pct"]):
+            return None
+        pct = float(snap.at[sym, "pct"])
+        keep = float(self.cfg.get("keep_pct", 0.5))
+        if pct < keep:
+            return f"Rank Exit (held {held}d, now in bottom {int(round((1 - pct) * 100))}%)"
+        return None
 
 
 _engine: Optional[AIv2] = None

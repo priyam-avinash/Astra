@@ -649,7 +649,7 @@ class AIPredictionEngine:
                         if model_info:
                             signal, confidence = model_info["signal"], model_info["confidence"]
                             mult_sl, mult_tp = model_info["sl_atr"], model_info["tp_atr"]
-                            model_info["model"] = "ASTRA.AI v2"
+                            model_info["model"] = f"ASTRA.AI v{v2.cfg.get('version', '2')}"
                 except Exception as e:
                     logger.warning(f"ASTRA.AI v2 unavailable for {asset_symbol}: {e}")
 
@@ -657,10 +657,10 @@ class AIPredictionEngine:
             entry_p = float(round(lp, 2))
             if signal == "SELL":
                 sl = round(entry_p + at * mult_sl, 2)
-                tp = round(entry_p - at * mult_tp, 2)
+                tp = round(entry_p - at * mult_tp, 2) if mult_tp else None
             else:
                 sl = round(entry_p - at * mult_sl, 2)
-                tp = round(entry_p + at * mult_tp, 2)
+                tp = round(entry_p + at * mult_tp, 2) if mult_tp else None   # v2.1: no fixed target
 
             # ── Build chart data (last 180 bars) ──
             chart_data = []

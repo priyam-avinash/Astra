@@ -315,8 +315,9 @@ export default function StrategiesView() {
           <div style={{ fontWeight: 700, marginBottom: 6 }}>Verified backtests (paper) — what to expect</div>
           <div><b>Recommended book</b> ({(summary.combined_rules_book.sleeves || []).map(x => x.replace('ASTRA.', '')).join(' + ')}, equal capital): {summary.combined_rules_book.cagr_pct}%/yr 2017–2026,
             max drawdown {summary.combined_rules_book.max_drawdown_pct}% · NIFTY 50: {summary.benchmarks?.NIFTY50?.cagr_pct}%/yr, max drawdown {summary.benchmarks?.NIFTY50?.max_drawdown_pct}%.</div>
+          {summary.astra_ai_v2?.note && <div style={{ color: 'rgba(255,255,255,0.6)' }}>{summary.astra_ai_v2.note}</div>}
           {summary.intraday && <div><b>Intraday</b> — {summary.intraday.verdict_note}</div>}
-          {summary.astra_ai_v2 && <div><b>ASTRA.AI v2</b> — out-of-sample Jul 2024–Oct 2026: {summary.astra_ai_v2.test_2024_07_to_2026_10?.total_return_pct}% total
+          {summary.astra_ai_v2 && <div><b>ASTRA.AI v{summary.astra_ai_v2.version || '2'}</b> — out-of-sample Jul 2024–Oct 2026: {summary.astra_ai_v2.test_2024_07_to_2026_10?.total_return_pct}% total ({summary.astra_ai_v2.test_2024_07_to_2026_10?.cagr_pct}%/yr)
             (NIFTY {summary.astra_ai_v2.nifty_same_window_pct}%, equal-weight universe {summary.astra_ai_v2.equal_weight_same_window_pct}% over the same window); walk-forward years: {Object.entries(summary.astra_ai_v2.walk_forward_years || {}).map(([y, v]) => `${y} ${v > 0 ? '+' : ''}${v}%`).join(' · ')}.</div>}
           <div style={{ color: 'rgba(255,255,255,0.5)', marginTop: 6, fontSize: '0.74rem' }}>{summary.method}</div>
         </div>

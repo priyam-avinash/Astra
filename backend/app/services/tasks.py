@@ -201,6 +201,12 @@ def check_and_close_position(db, p, current_price: float) -> bool:
             reason = "Target Hit"
         elif p.stop_loss and current_price >= p.stop_loss:
             reason = "Stop Loss Hit"
+    if not reason and p.direction == "BUY" and (getattr(p, "engine", "") or "").startswith("astra_ai"):
+        try:   # ASTRA.AI v2.1 rotation: sell once the stock drops out of the top ranks
+            from app.services.ai_v2 import get_ai_v2
+            reason = get_ai_v2().rank_exit_due(p.asset, p.entry_time)
+        except Exception as e:
+            logger.debug(f"rank-exit check for {p.asset} skipped: {e}")
     if not reason:
         return False
     if not claim_position(db, p.id):

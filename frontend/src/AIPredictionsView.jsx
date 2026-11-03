@@ -143,7 +143,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
         <div>
           <h2>AI Trading Signals</h2>
           <p style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>
-            Probability-weighted predictions using <strong>{engine === 'astra' ? 'Astra 1.0 (Safe)' : engine === 'astra_ai' ? 'ASTRA.AI v2 (ranking model)' : 'ASTRA.ML (experimental)'}</strong>.
+            Probability-weighted predictions using <strong>{engine === 'astra' ? 'Astra 1.0 (Safe)' : engine === 'astra_ai' ? 'ASTRA.AI v2.1 (ranking model)' : 'ASTRA.ML (experimental)'}</strong>.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
@@ -157,7 +157,7 @@ export default function AIPredictionsView({ queue, setQueue }) {
               style={{ background: 'transparent', border: 'none', color: '#60a5fa', fontSize: '0.8rem', fontWeight: 700, outline: 'none', cursor: 'pointer' }}
             >
               <option value="astra">Astra 1.0 (Safe)</option>
-              <option value="astra_ai">ASTRA.AI v2 (ranking model)</option>
+              <option value="astra_ai">ASTRA.AI v2.1 (ranking model)</option>
               <option value="astra_ml">ASTRA.ML (experimental)</option>
             </select>
           </div>

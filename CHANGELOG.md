@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.15.0 — 2026-11-03
+- ASTRA.AI v2.1: two-model ranking ensemble (ExtraTrees on 1.5/3 and 2/4 ATR barrier labels) with rotation rules chosen on walk-forward folds - hold the 10 highest-ranked large caps, sell after 40 trading days once a stock leaves the top half, 4x ATR safety stop, no fixed target; untouched Jul 2024-Oct 2026 test +6.9%/yr (v2.0 +2.4%, NIFTY -1.8%, equal-weight universe +1.4%); rank exits run in the position monitor
+
 ## 1.14.10 — 2026-11-03
 - Postgres: name the psycopg2 driver explicitly (SQLAlchemy 2.1 defaults to psycopg 3, which crashed the hosted app once Neon was attached); verified register, positions, history, portfolio, mutual funds and settings against a real Postgres
 

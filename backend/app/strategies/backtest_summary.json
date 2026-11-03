@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-30",
+ "generated": "2026-11-04",
  "method": "Daily bars, next-day-open entries, gap-aware stops, NSE delivery costs (0.25% + 0.05% slippage/side), \u20b910L capital, max 10 positions, 86-stock large-cap universe (today's members: survivorship bias). Rule engines: Jun 2017\u2013Oct 2026. ASTRA.AI v2: walk-forward (each year scored by a model trained only on earlier data) and an untouched out-of-sample test Jul 2024\u2013Oct 2026. Past results don't guarantee future returns.",
  "strategies": {
   "ASTRA.1.0": {
@@ -145,15 +145,38 @@
   "note": "Equal capital in STAGE2 and PULLBACK (v1.14.7 settings). MOMENTUM was dropped from the book: it lowered return without cutting drawdown."
  },
  "astra_ai_v2": {
+  "version": "2.1",
   "walk_forward_years": {
-   "2019": 2.7,
-   "2020": 28.8,
-   "2021": 39.1,
-   "2022": 6.7,
-   "2023": 95.2
+   "2019": 52.2,
+   "2020": 33.3,
+   "2021": 69.3,
+   "2022": 7.6,
+   "2023": 120.3
   },
-  "walk_forward_note": "2023 fold covers Jan 2023\u2013Apr 2024",
+  "walk_forward_note": "2023 fold covers Jan 2023\u2013Apr 2024; scores are walk-forward out-of-sample",
   "test_2024_07_to_2026_10": {
+   "cagr_pct": 6.9,
+   "total_return_pct": 16.4,
+   "max_dd_pct": -20.6,
+   "sharpe": 0.45,
+   "trades": 125,
+   "win_rate_pct": 48.8,
+   "yearly_pct": {
+    "2024": 2.1,
+    "2025": 17.6,
+    "2026": -3.0
+   }
+  },
+  "rules": {
+   "top_n": 10,
+   "max_pos": 10,
+   "min_hold_days": 40,
+   "keep_pct": 0.5,
+   "stop_k": 4.0,
+   "tgt_k": null,
+   "regime": false
+  },
+  "previous_v2_0_test": {
    "cagr_pct": 2.4,
    "total_return_pct": 5.7,
    "max_dd_pct": -14.6,
@@ -168,16 +191,22 @@
     "2026": -7.6
    }
   },
-  "rules": {
-   "max_bars": 60,
-   "max_pos": 15,
-   "q": 0.8,
-   "regime": true,
-   "stop_k": 2.0,
-   "tgt_k": 6.0
+  "single_model_same_rules_test": {
+   "cagr_pct": 3.2,
+   "total_return_pct": 7.6,
+   "max_dd_pct": -22.8,
+   "sharpe": 0.27,
+   "trades": 132,
+   "win_rate_pct": 48.5,
+   "yearly_pct": {
+    "2024": -2.2,
+    "2025": 19.5,
+    "2026": -7.9
+   }
   },
   "nifty_same_window_pct": -4.1,
-  "equal_weight_same_window_pct": 3.6
+  "equal_weight_same_window_pct": 3.6,
+  "note": "v2.1 = two ExtraTrees models (1.5/3 and 2/4 ATR barrier labels) averaged by universe rank; holds the top 10, sells after 40 trading days once a stock leaves the top half, 4\u00d7ATR safety stop. On the untouched Jul 2024\u2013Oct 2026 window: +6.9%/yr (v2.0: +2.4%/yr; NIFTY \u22121.8%/yr; equal-weight universe +1.4%/yr). Earlier years use today's large caps, so they are inflated by survivorship bias."
  },
  "astra_ml": {
   "verdict": "experimental",

@@ -5,7 +5,7 @@ import { Search, RefreshCw, Telescope, TrendingUp, TrendingDown,
          CheckCircle, AlertCircle, Filter, ChevronDown } from 'lucide-react';
 
 const ENGINES = [
-  { value: 'astra_ai', label: 'ASTRA.AI v2 (ranking model)' },
+  { value: 'astra_ai', label: 'ASTRA.AI v2.1 (ranking model)' },
   { value: 'astra_ml', label: 'ASTRA.ML (experimental)' },
   { value: 'astra',    label: 'ASTRA 1.0 (Rules)' },
 ];
@@ -205,7 +205,7 @@ export default function ScannerView() {
             <div style={{ fontSize: 16, fontWeight: 600 }}>No signals found</div>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
               {engine !== 'astra'
-                ? 'When NIFTY is below its 200-day average (bear regime) ASTRA.AI v2 stays in cash by design — in backtests this filter avoided most bear-market losses. Check the Strategies page for STAGE2 / PULLBACK setups.'
+                ? 'ASTRA.AI v2.1 only signals BUY for the 10 highest-ranked large caps of the day. Try lowering the minimum confidence, or check the Strategies page for STAGE2 / PULLBACK setups.'
                 : 'Try lowering the minimum confidence or changing the engine'}
             </div>
           </div>
