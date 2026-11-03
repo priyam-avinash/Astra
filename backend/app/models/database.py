@@ -20,6 +20,10 @@ def _resolve_database_url() -> str:
         url = (os.getenv(key) or "").strip().strip('"')
         if url.startswith("postgres://"):
             url = "postgresql://" + url[len("postgres://"):]
+        if url.startswith("postgresql://"):
+            # SQLAlchemy ≥ 2.1 maps bare postgresql:// to psycopg 3, which isn't installed;
+            # psycopg2-binary is (requirements.txt), so name the driver explicitly.
+            url = "postgresql+psycopg2://" + url[len("postgresql://"):]
         if url.startswith("postgresql") or url.startswith("sqlite"):
             return url
     if SERVERLESS:

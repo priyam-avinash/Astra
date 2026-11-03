@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.14.10 — 2026-11-03
+- Postgres: name the psycopg2 driver explicitly (SQLAlchemy 2.1 defaults to psycopg 3, which crashed the hosted app once Neon was attached); verified register, positions, history, portfolio, mutual funds and settings against a real Postgres
+
 ## 1.14.9 — 2026-10-30
 - ASTRA 1.0: 2x ATR stop and 6x ATR target (was 1.5/3) - 2017-2026 backtest -6.7%/yr -> +8.3%/yr (drawdown -50.9% -> -30.2%); still trails NIFTY, stays not recommended
 
