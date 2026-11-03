@@ -12,7 +12,7 @@ from research.compare_models import add_scores, FOLDS, TEST
 
 SIDE = 0.003
 
-def run(ds, score, start, end, slots=10, top=10, min_hold=20, keep_pct=0.6, stop_k=None):
+def run(ds, score, start, end, slots=10, top=10, min_hold=20, keep_pct=0.6, stop_k=None, curve_out=None):
     d = ds[(ds.date >= pd.Timestamp(start) - pd.Timedelta(days=10)) & (ds.date <= pd.Timestamp(end))]
     P = {c: d.pivot(index="date", columns="symbol", values=c) for c in ("Open", "Close", "Low", "ATR")}
     sc = d.pivot(index="date", columns="symbol", values=score)
@@ -55,7 +55,10 @@ def run(ds, score, start, end, slots=10, top=10, min_hold=20, keep_pct=0.6, stop
         if free > 0:
             cand = pos_n.loc[t].dropna().sort_values()
             orders_buy = [s for s in cand.index[:top] if s not in hold][:free]
-    c = pd.Series(dict(curve)); yrs = (c.index[-1] - c.index[0]).days / 365.25
+    c = pd.Series(dict(curve))
+    if curve_out is not None:
+        curve_out.append(c)
+    yrs = (c.index[-1] - c.index[0]).days / 365.25
     dr = c.pct_change().dropna()
     y = c.resample("YE").last(); y = pd.concat([c.iloc[:1], y]).pct_change().dropna()
     return {"cagr_pct": round(((c.iloc[-1] / c.iloc[0]) ** (1 / max(yrs, .1)) - 1) * 100, 1),

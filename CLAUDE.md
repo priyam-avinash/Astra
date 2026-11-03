@@ -72,7 +72,7 @@ python -c "from app.services.ai_predictor import ai_engine; print(ai_engine.anal
 
 | Engine | Selector | Where | Status (verified backtests in `app/strategies/backtest_summary.json`) |
 |--------|----------|-------|------|
-| ASTRA.AI v2 | `astra_ai` | `services/ai_v2.py` | Default. Universe-ranking ExtraTrees (numpy forest, `saved_models/astra_ai_v2.json`); BUY = top-20% score + NIFTY > 200DMA |
+| ASTRA.AI v2.1 | `astra_ai` | `services/ai_v2.py` | Default. Two ExtraTrees rankers (tb15 + tb20 barrier labels, numpy forests) averaged by universe rank; BUY = today's top 10; rank exit after 40 trading days once out of the top half (`rank_exit_due`, run by the position monitor); 4×ATR safety stop, no target. Retrain: `research/oos_scores.py` → `live_rules_study.py` → `export_model_v21.py` |
 | ASTRA 1.0 | `astra` | `ai_predictor.py` (`ASTRA1` config) | Rule engine (7 confirmations); not recommended |
 | ASTRA.ML | `astra_ml` | `ai_predictor.py` | BiLSTM, experimental — no out-of-sample skill |
 | ASTRA.CRYPTO | `astra_crypto` | `crypto_engine.py` | Regime rules (Donchian / BB) |

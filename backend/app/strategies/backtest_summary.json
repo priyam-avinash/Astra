@@ -206,7 +206,27 @@
   },
   "nifty_same_window_pct": -4.1,
   "equal_weight_same_window_pct": 3.6,
-  "note": "v2.1 = two ExtraTrees models (1.5/3 and 2/4 ATR barrier labels) averaged by universe rank; holds the top 10, sells after 40 trading days once a stock leaves the top half, 4\u00d7ATR safety stop. On the untouched Jul 2024\u2013Oct 2026 window: +6.9%/yr (v2.0: +2.4%/yr; NIFTY \u22121.8%/yr; equal-weight universe +1.4%/yr). Earlier years use today's large caps, so they are inflated by survivorship bias."
+  "note": "v2.1 = two ExtraTrees models (1.5/3 and 2/4 ATR barrier labels) averaged by universe rank; holds the top 10, sells after 40 trading days once a stock leaves the top half, 4\u00d7ATR safety stop. On the untouched Jul 2024\u2013Oct 2026 window: +6.9%/yr (v2.0: +2.4%/yr; NIFTY \u22121.8%/yr; equal-weight universe +1.4%/yr). Earlier years use today's large caps, so they are inflated by survivorship bias.",
+  "with_rules_book": {
+   "sleeves": [
+    "ASTRA.AI v2.1",
+    "ASTRA.STAGE2",
+    "ASTRA.PULLBACK"
+   ],
+   "2019_on": {
+    "cagr_pct": 23.6,
+    "max_drawdown_pct": -21.0
+   },
+   "test_2024_07_on": {
+    "cagr_pct": 2.9,
+    "max_drawdown_pct": -11.9
+   },
+   "ai_alone_2019_on": {
+    "cagr_pct": 34.2,
+    "max_drawdown_pct": -40.6
+   },
+   "note": "Equal capital in the three: lower return than ASTRA.AI v2.1 alone but about half its drawdown. 2019\u20132023 figures are inflated by survivorship bias."
+  }
  },
  "astra_ml": {
   "verdict": "experimental",
