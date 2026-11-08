@@ -6,7 +6,6 @@ import { Search, RefreshCw, Telescope, TrendingUp, TrendingDown,
 
 const ENGINES = [
   { value: 'astra_ai', label: 'ASTRA.AI v2.1 (ranking model)' },
-  { value: 'astra_ml', label: 'ASTRA.ML (experimental)' },
   { value: 'astra',    label: 'ASTRA 1.0 (Rules)' },
 ];
 

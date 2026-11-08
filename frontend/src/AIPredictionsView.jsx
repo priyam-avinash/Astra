@@ -156,9 +156,8 @@ export default function AIPredictionsView({ queue, setQueue }) {
               onChange={(e) => setEngine(e.target.value)}
               style={{ background: 'transparent', border: 'none', color: '#60a5fa', fontSize: '0.8rem', fontWeight: 700, outline: 'none', cursor: 'pointer' }}
             >
-              <option value="astra">Astra 1.0 (Safe)</option>
+              <option value="astra">ASTRA 1.0 (rules)</option>
               <option value="astra_ai">ASTRA.AI v2.1 (ranking model)</option>
-              <option value="astra_ml">ASTRA.ML (experimental)</option>
             </select>
           </div>
 

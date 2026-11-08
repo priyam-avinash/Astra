@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.15.2 — 2026-11-08
+- ASTRA.ML retired from the engine pickers: a walk-forward GRU retest had no out-of-sample skill (IC -0.01 on 2019-2024) and dragged the ensemble down; Analysis now opens on ASTRA.AI v2.1
+
 ## 1.15.1 — 2026-11-03
 - Research: 60-day-horizon ranker and rule-strategy AI filters tested (neither helped out-of-sample, not adopted); combined ASTRA.AI v2.1 + STAGE2 + PULLBACK book recorded in the verified backtests; docs for the v2.1 retraining pipeline
 

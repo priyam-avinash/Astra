@@ -317,7 +317,7 @@ const EQUITY_QUICK = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'AAPL'];
 
 function AnalysisViewImpl({ initialSymbol, initialMarket }) {
   const [symbol, setSymbol] = useState(initialSymbol || 'RELIANCE');
-  const [engine, setEngine] = useState('astra');
+  const [engine, setEngine] = useState('astra_ai');
   const [cryptoMarket, setCryptoMarket] = useState(initialMarket || 'international');
   const [activeTab, setActiveTab] = useState('Overview');
   const [data, setData] = useState(null);
@@ -606,7 +606,7 @@ function AnalysisViewImpl({ initialSymbol, initialMarket }) {
           </div>
         ) : (
           <div style={S.engineBar}>
-            {['astra', 'astra_ai', 'astra_ml'].map(e => (
+            {['astra_ai', 'astra'].map(e => (
               <button key={e} style={S.engineTab(engine === e)} onClick={() => switchEngine(e)}>
                 {e === 'astra' ? 'ASTRA 1.0' : e === 'astra_ai' ? 'ASTRA.AI v2.1' : 'ASTRA.ML (exp.)'}
               </button>
