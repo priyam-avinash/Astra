@@ -1,61 +1,60 @@
 {
- "generated": "2026-11-04",
- "method": "Daily bars, next-day-open entries, gap-aware stops, NSE delivery costs (0.25% + 0.05% slippage/side), \u20b910L capital, max 10 positions, 86-stock large-cap universe (today's members: survivorship bias). Rule engines: Jun 2017\u2013Oct 2026. ASTRA.AI v2: walk-forward (each year scored by a model trained only on earlier data) and an untouched out-of-sample test Jul 2024\u2013Oct 2026. Past results don't guarantee future returns.",
+ "generated": "2026-11-24",
+ "method": "Daily bars, next-day-open entries, gap-aware stops, NSE delivery costs (0.25% + 0.05% slippage/side), \u20b910L capital, max 10 positions, 86-stock large-cap universe (today's members: survivorship bias). Rule engines: Jun 2017\u201323 Nov 2026. ASTRA.AI v2: walk-forward (each year scored by a model trained only on earlier data) and an untouched out-of-sample test Jul 2024\u2013Oct 2026. Past results don't guarantee future returns.",
  "strategies": {
   "ASTRA.1.0": {
-   "cagr_pct": 8.3,
-   "max_drawdown_pct": -30.2,
-   "sharpe": 0.56,
+   "cagr_pct": 11.0,
+   "max_drawdown_pct": -30.8,
+   "sharpe": 0.71,
    "yearly_return_pct": {
-    "2017": 4.4,
-    "2018": -6.8,
-    "2019": 15.3,
-    "2020": 15.6,
-    "2021": 30.8,
-    "2022": 10.7,
-    "2023": 22.9,
-    "2024": 12.3,
-    "2025": 0.5,
-    "2026": -19.0
+    "2017": 12.6,
+    "2018": -8.6,
+    "2019": 11.3,
+    "2020": 16.2,
+    "2021": 41.6,
+    "2022": 1.0,
+    "2023": 37.2,
+    "2024": 18.0,
+    "2025": 2.8,
+    "2026": -15.4
    },
-   "win_rate_pct": 35.0,
-   "avg_trade_net_pct": 1.02,
-   "trades_taken": 933,
-   "avg_exposure_pct": 92.6,
+   "win_rate_pct": 36.2,
+   "avg_trade_net_pct": 1.32,
+   "trades_taken": 913,
+   "avg_exposure_pct": 92.1,
    "recommended": false,
-   "verdict_note": "Improved but still trails NIFTY with a \u221219% 2026 \u2014 not recommended",
-   "tuning_note": "v1.14.9: 2\u00d7ATR stop, 6\u00d7ATR target (was 1.5/3). 2017\u20132026 went from \u22126.7% to +8.3%/yr; on the untouched Jul 2024\u2013Oct 2026 window the fast replica improved from \u221218% to \u22129%/yr."
+   "verdict_note": "Near NIFTY over the full period but \u221215% in 2026 \u2014 not recommended"
   },
   "ASTRA.PULLBACK": {
-   "cagr_pct": 10.2,
-   "max_drawdown_pct": -14.7,
-   "sharpe": 1.02,
+   "cagr_pct": 9.6,
+   "max_drawdown_pct": -15.1,
+   "sharpe": 0.98,
    "yearly_return_pct": {
-    "2017": 15.3,
-    "2018": 10.0,
-    "2019": 1.2,
-    "2020": 30.2,
-    "2021": 16.6,
+    "2017": 9.5,
+    "2018": 11.4,
+    "2019": 0.6,
+    "2020": 29.9,
+    "2021": 16.9,
     "2022": -8.5,
     "2023": 30.7,
     "2024": 14.8,
     "2025": -0.8,
-    "2026": -6.4
+    "2026": -6.2
    },
-   "win_rate_pct": 43.0,
-   "avg_trade_net_pct": 1.64,
-   "trades_taken": 619,
-   "avg_exposure_pct": 55.0,
+   "win_rate_pct": 42.2,
+   "avg_trade_net_pct": 1.56,
+   "trades_taken": 615,
+   "avg_exposure_pct": 53.3,
    "recommended": true,
    "tuning_note": "v1.14.7: target 6\u00d7ATR, sector filter off. Untouched test: \u22122.3% vs \u22123.3%/yr, drawdown \u221210.9% vs \u221214.8%."
   },
   "ASTRA.MOMENTUM": {
-   "cagr_pct": 7.2,
-   "max_drawdown_pct": -19.0,
-   "sharpe": 0.63,
+   "cagr_pct": 6.9,
+   "max_drawdown_pct": -18.7,
+   "sharpe": 0.62,
    "yearly_return_pct": {
-    "2017": 3.6,
-    "2018": -11.2,
+    "2017": 0.0,
+    "2018": -12.4,
     "2019": -1.8,
     "2020": 26.5,
     "2021": 15.0,
@@ -63,79 +62,79 @@
     "2023": 34.9,
     "2024": 18.7,
     "2025": -5.6,
-    "2026": -7.0
+    "2026": -3.6
    },
-   "win_rate_pct": 37.4,
-   "avg_trade_net_pct": 1.61,
-   "trades_taken": 454,
-   "avg_exposure_pct": 47.5,
+   "win_rate_pct": 37.9,
+   "avg_trade_net_pct": 1.56,
+   "trades_taken": 457,
+   "avg_exposure_pct": 46.8,
    "recommended": true,
    "tuning_note": "Tuning improved 2017\u20132024 but made the untouched test worse (\u221210.5% vs \u22126.9%/yr), so the settings were left unchanged."
   },
   "ASTRA.STAGE2": {
-   "cagr_pct": 15.4,
-   "max_drawdown_pct": -21.3,
-   "sharpe": 1.13,
+   "cagr_pct": 12.7,
+   "max_drawdown_pct": -19.0,
+   "sharpe": 0.96,
    "yearly_return_pct": {
-    "2017": 2.5,
-    "2018": -0.1,
-    "2019": 9.1,
-    "2020": 36.3,
-    "2021": 53.4,
-    "2022": -3.4,
-    "2023": 54.4,
-    "2024": 10.1,
+    "2017": 0.0,
+    "2018": -6.3,
+    "2019": 4.4,
+    "2020": 33.2,
+    "2021": 57.2,
+    "2022": -4.1,
+    "2023": 42.2,
+    "2024": 12.4,
     "2025": 10.1,
-    "2026": -9.1
+    "2026": -9.7
    },
-   "win_rate_pct": 41.3,
-   "avg_trade_net_pct": 2.04,
-   "trades_taken": 796,
-   "avg_exposure_pct": 68.6,
+   "win_rate_pct": 40.0,
+   "avg_trade_net_pct": 1.74,
+   "trades_taken": 819,
+   "avg_exposure_pct": 67.6,
    "recommended": true,
    "tuning_note": "v1.14.7: 52-week-high proximity 90%, 80-day time stop. Chosen on 2017\u20132024 data; on the untouched Jul 2024\u2013Oct 2026 test it beat the old settings (+1.8% vs \u22121.6%/yr at 8 positions). Full-period figures are partly in-sample."
   },
   "ASTRA.QUALITY": {
-   "cagr_pct": 1.0,
+   "cagr_pct": 1.1,
    "max_drawdown_pct": -17.7,
-   "sharpe": 0.17,
+   "sharpe": 0.19,
    "yearly_return_pct": {
-    "2017": -1.1,
-    "2018": -6.2,
+    "2017": 0.0,
+    "2018": -5.3,
     "2019": -1.2,
     "2020": 11.6,
-    "2021": 7.8,
+    "2021": 7.7,
     "2022": -3.8,
     "2023": 9.0,
     "2024": 1.6,
     "2025": -5.9,
-    "2026": -0.6
+    "2026": -1.4
    },
-   "win_rate_pct": 38.6,
-   "avg_trade_net_pct": 0.16,
-   "trades_taken": 799,
-   "avg_exposure_pct": 15.9,
+   "win_rate_pct": 39.3,
+   "avg_trade_net_pct": 0.17,
+   "trades_taken": 783,
+   "avg_exposure_pct": 15.7,
    "recommended": false,
    "verdict_note": "Lost money over 2017\u20132026 \u2014 not recommended",
    "tuning_note": "v1.14.7: top decile only, 3\u00d7ATR stop, 6\u00d7ATR target. Untouched test: \u22122.3% vs \u221211.3%/yr. Still weak \u2014 not recommended."
   }
  },
  "combined_rules_book": {
-  "final_equity": 3161097,
-  "cagr_pct": 13.1,
-  "max_drawdown_pct": -16.7,
-  "sharpe": 1.18,
+  "final_equity": 2748802,
+  "cagr_pct": 11.3,
+  "max_drawdown_pct": -16.3,
+  "sharpe": 1.05,
   "yearly_return_pct": {
-   "2017": 8.9,
-   "2018": 5.3,
-   "2019": 4.7,
-   "2020": 33.0,
-   "2021": 34.1,
-   "2022": -5.7,
-   "2023": 44.0,
-   "2024": 12.0,
-   "2025": 5.6,
-   "2026": -8.1
+   "2017": 4.8,
+   "2018": 2.9,
+   "2019": 2.3,
+   "2020": 31.3,
+   "2021": 35.0,
+   "2022": -6.2,
+   "2023": 36.8,
+   "2024": 13.5,
+   "2025": 5.2,
+   "2026": -8.2
   },
   "years_negative": 2,
   "sleeves": [
@@ -147,26 +146,13 @@
  "astra_ai_v2": {
   "version": "2.1",
   "walk_forward_years": {
-   "2019": 52.2,
-   "2020": 33.3,
-   "2021": 69.3,
-   "2022": 7.6,
+   "2019": 39.9,
+   "2020": 34.4,
+   "2021": 85.8,
+   "2022": 11.6,
    "2023": 120.3
   },
   "walk_forward_note": "2023 fold covers Jan 2023\u2013Apr 2024; scores are walk-forward out-of-sample",
-  "test_2024_07_to_2026_10": {
-   "cagr_pct": 6.9,
-   "total_return_pct": 16.4,
-   "max_dd_pct": -20.6,
-   "sharpe": 0.45,
-   "trades": 125,
-   "win_rate_pct": 48.8,
-   "yearly_pct": {
-    "2024": 2.1,
-    "2025": 17.6,
-    "2026": -3.0
-   }
-  },
   "rules": {
    "top_n": 10,
    "max_pos": 10,
@@ -192,40 +178,44 @@
    }
   },
   "single_model_same_rules_test": {
-   "cagr_pct": 3.2,
-   "total_return_pct": 7.6,
-   "max_dd_pct": -22.8,
-   "sharpe": 0.27,
-   "trades": 132,
-   "win_rate_pct": 48.5,
+   "cagr_pct": 2.5,
+   "total_return_pct": 6.2,
+   "max_dd_pct": -24.7,
+   "sharpe": 0.23,
+   "trades": 143,
+   "win_rate_pct": 44.1,
    "yearly_pct": {
-    "2024": -2.2,
-    "2025": 19.5,
-    "2026": -7.9
+    "2024": -2.9,
+    "2025": 16.2,
+    "2026": -5.9
    }
   },
-  "nifty_same_window_pct": -4.1,
-  "equal_weight_same_window_pct": 3.6,
-  "note": "v2.1 = two ExtraTrees models (1.5/3 and 2/4 ATR barrier labels) averaged by universe rank; holds the top 10, sells after 40 trading days once a stock leaves the top half, 4\u00d7ATR safety stop. On the untouched Jul 2024\u2013Oct 2026 window: +6.9%/yr (v2.0: +2.4%/yr; NIFTY \u22121.8%/yr; equal-weight universe +1.4%/yr). Earlier years use today's large caps, so they are inflated by survivorship bias.",
-  "with_rules_book": {
-   "sleeves": [
-    "ASTRA.AI v2.1",
-    "ASTRA.STAGE2",
-    "ASTRA.PULLBACK"
-   ],
-   "2019_on": {
-    "cagr_pct": 23.6,
-    "max_drawdown_pct": -21.0
-   },
-   "test_2024_07_on": {
-    "cagr_pct": 2.9,
-    "max_drawdown_pct": -11.9
-   },
-   "ai_alone_2019_on": {
-    "cagr_pct": 34.2,
-    "max_drawdown_pct": -40.6
-   },
-   "note": "Equal capital in the three: lower return than ASTRA.AI v2.1 alone but about half its drawdown. 2019\u20132023 figures are inflated by survivorship bias."
+  "nifty_same_window_pct": {
+   "cagr_pct": 2.1,
+   "max_dd_pct": -15.8
+  },
+  "equal_weight_same_window_pct": {
+   "cagr_pct": 4.1,
+   "max_dd_pct": -20.6,
+   "yearly_pct": {
+    "2024": -1.0,
+    "2025": 9.6,
+    "2026": 1.5
+   }
+  },
+  "note": "v2.1 = two ExtraTrees models averaged by universe rank; holds the top 10, sells after 40 trading days once a stock leaves the top half, 4\u00d7ATR safety stop. Retrained 24 Nov 2026 on data to 23 Nov. On the untouched Jul 2024 \u2192 23 Nov 2026 window: +4.7%/yr (NIFTY +2.1%/yr, equal-weight universe +4.1%/yr). Its lead shrank in the Oct\u2013Nov rally, which it lagged (2026: \u22129.5% vs +1.5% for the universe). Earlier years use today's large caps, so they are inflated by survivorship bias.",
+  "test_2024_07_to_2026_11": {
+   "cagr_pct": 4.7,
+   "total_return_pct": 11.5,
+   "max_dd_pct": -19.5,
+   "sharpe": 0.34,
+   "trades": 135,
+   "win_rate_pct": 46.7,
+   "yearly_pct": {
+    "2024": 5.2,
+    "2025": 17.1,
+    "2026": -9.5
+   }
   }
  },
  "astra_ml": {
@@ -349,9 +339,9 @@
  },
  "benchmarks": {
   "NIFTY50": {
-   "cagr_pct": 9.8,
+   "cagr_pct": 10.8,
    "max_drawdown_pct": -38.4,
-   "sharpe": 0.66,
+   "sharpe": 0.72,
    "yearly_return_pct": {
     "2017": 9.5,
     "2018": 3.2,
@@ -362,7 +352,7 @@
     "2023": 20.0,
     "2024": 8.8,
     "2025": 10.5,
-    "2026": -11.4
+    "2026": -3.0
    }
   },
   "equal_weight_universe": {

@@ -4,6 +4,9 @@ Every change ships as its own version (semantic versioning: MAJOR.MINOR.PATCH).
 Each release is tagged in git (`vX.Y.Z`) and the running version is shown in the
 app sidebar and at `GET /health`. Paper trading only, in every version.
 
+## 1.15.3 — 2026-11-24
+- ASTRA.AI v2.1 retrained on prices to 23 Nov 2026 (same walk-forward-chosen rules); verified backtests refreshed to 23 Nov: AI v2.1 +4.7%/yr on the untouched Jul 2024 window vs NIFTY +2.1% and equal-weight +4.1% (it lagged the Oct-Nov rally); STAGE2 12.7%/yr, PULLBACK 9.6%/yr, STAGE2+PULLBACK book 11.3%/yr (-16.3% max drawdown) vs NIFTY 10.8%/yr (-38.4%)
+
 ## 1.15.2 — 2026-11-08
 - ASTRA.ML retired from the engine pickers: a walk-forward GRU retest had no out-of-sample skill (IC -0.01 on 2019-2024) and dragged the ensemble down; Analysis now opens on ASTRA.AI v2.1
 

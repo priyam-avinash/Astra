@@ -64,9 +64,9 @@
     "rk_dist_52w_high",
     "rk_vol_20"
   ],
-  "trained_until": "2026-08-19",
-  "exported_on": "2026-11-03",
-  "train_rows": 178000,
+  "trained_until": "2026-09-23",
+  "exported_on": "2026-11-24",
+  "train_rows": 178360,
   "top_n": 10,
   "max_pos": 10,
   "min_hold_days": 40,
@@ -76,13 +76,13 @@
   "regime": false,
   "validation": {
     "walk_forward_fold_returns_pct": [
-      52.2,
-      33.3,
-      69.3,
-      7.6,
+      39.9,
+      34.4,
+      85.8,
+      11.6,
       120.3
     ],
-    "mean_sharpe": 1.926,
+    "mean_sharpe": 1.95,
     "folds": [
       "2019",
       "2020",
@@ -93,48 +93,48 @@
   },
   "test": {
     "rotation_ensemble": {
-      "cagr_pct": 6.9,
-      "total_return_pct": 16.4,
-      "max_dd_pct": -20.6,
-      "sharpe": 0.45,
-      "trades": 125,
-      "win_rate_pct": 48.8,
+      "cagr_pct": 4.7,
+      "total_return_pct": 11.5,
+      "max_dd_pct": -19.5,
+      "sharpe": 0.34,
+      "trades": 135,
+      "win_rate_pct": 46.7,
       "yearly_pct": {
-        "2024": 2.1,
-        "2025": 17.6,
-        "2026": -3.0
+        "2024": 5.2,
+        "2025": 17.1,
+        "2026": -9.5
       }
     },
     "same_rules_single_model_tb15": {
-      "cagr_pct": 3.2,
-      "total_return_pct": 7.6,
-      "max_dd_pct": -22.8,
-      "sharpe": 0.27,
-      "trades": 132,
-      "win_rate_pct": 48.5,
+      "cagr_pct": 2.5,
+      "total_return_pct": 6.2,
+      "max_dd_pct": -24.7,
+      "sharpe": 0.23,
+      "trades": 143,
+      "win_rate_pct": 44.1,
       "yearly_pct": {
-        "2024": -2.2,
-        "2025": 19.5,
-        "2026": -7.9
+        "2024": -2.9,
+        "2025": 16.2,
+        "2026": -5.9
       }
     }
   },
   "full_oos_2019_on": {
-    "cagr_pct": 34.2,
-    "total_return_pct": 888.4,
-    "max_dd_pct": -40.6,
-    "sharpe": 1.35,
-    "trades": 363,
-    "win_rate_pct": 55.9,
+    "cagr_pct": 32.9,
+    "total_return_pct": 841.8,
+    "max_dd_pct": -39.7,
+    "sharpe": 1.33,
+    "trades": 374,
+    "win_rate_pct": 57.8,
     "yearly_pct": {
-      "2019": 52.2,
-      "2020": 40.7,
-      "2021": 62.9,
-      "2022": 8.5,
-      "2023": 72.2,
-      "2024": 34.4,
-      "2025": 18.2,
-      "2026": -4.6
+      "2019": 39.9,
+      "2020": 31.7,
+      "2021": 72.5,
+      "2022": 7.6,
+      "2023": 51.0,
+      "2024": 53.0,
+      "2025": 23.9,
+      "2026": -3.8
     }
   },
   "notes": "Scores are walk-forward out-of-sample (refit yearly to 2023, then every 6 months, training data ending 61 days before each segment). Rules chosen on 2019\u20132024-04 folds only; the Jul 2024 \u2192 test window was never used for choosing. The universe is today's large caps (survivorship bias inflates 2019\u20132023). Past results don't guarantee future returns."
